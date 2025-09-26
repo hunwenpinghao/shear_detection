@@ -67,6 +67,68 @@ class FeatureExtractor:
             'tear_to_shear_ratio': float(tear_to_shear_ratio)
         }
     
+    def detect_all_white_spots(self, image: np.ndarray) -> Dict[str, Any]:
+        """
+        检测原始图像中的所有白色斑块（不受分割限制）
+        
+        Args:
+            image: 原始图像
+            
+        Returns:
+            全部白色斑块检测结果
+        """
+        # 白斑检测阈值
+        white_threshold = self.config['white_spot_threshold']
+        
+        # 二值化检测白色区域（整个图像）
+        _, white_binary = cv2.threshold(image, white_threshold, 255, cv2.THRESH_BINARY)
+        
+        # 形态学操作去除噪点
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        white_binary = cv2.morphologyEx(white_binary, cv2.MORPH_OPEN, kernel)
+        
+        # 连通域分析
+        labeled_spots = measure.label(white_binary)
+        regions = measure.regionprops(labeled_spots)
+        
+        # 过滤斑块大小
+        min_area = self.config['min_spot_area']
+        max_area = self.config['max_spot_area']
+        
+        valid_spots = []
+        spot_areas = []
+        spot_centroids = []
+        
+        for region in regions:
+            if min_area <= region.area <= max_area:
+                valid_spots.append(region)
+                spot_areas.append(region.area)
+                spot_centroids.append(region.centroid)
+        
+        # 计算统计特征
+        total_spot_area = sum(spot_areas)
+        total_image_area = image.shape[0] * image.shape[1]
+        spot_density = total_spot_area / total_image_area if total_image_area > 0 else 0
+        
+        # 计算斑块分布特征
+        if len(spot_centroids) > 1:
+            centroids_array = np.array(spot_centroids)
+            centroid_std = np.std(centroids_array, axis=0)
+            distribution_uniformity = 1.0 / (1.0 + np.mean(centroid_std))
+        else:
+            distribution_uniformity = 0.0
+        
+        return {
+            'all_spot_count': len(valid_spots),
+            'all_total_spot_area': total_spot_area,
+            'all_spot_density': spot_density,
+            'all_average_spot_size': np.mean(spot_areas) if spot_areas else 0,
+            'all_spot_size_std': np.std(spot_areas) if spot_areas else 0,
+            'all_distribution_uniformity': distribution_uniformity,
+            'all_spot_centroids': spot_centroids,
+            'all_white_binary_mask': white_binary
+        }
+
     def detect_white_spots(self, image: np.ndarray, 
                           tear_mask: np.ndarray) -> Dict[str, Any]:
         """
@@ -282,22 +344,29 @@ class FeatureExtractor:
         ratio_features = self.calculate_surface_ratio(tear_mask, shear_mask)
         features.update(ratio_features)
         
-        # 2. 白色斑块特征
+        # 2. 整体白色斑块特征（新增）
+        all_spot_features = self.detect_all_white_spots(image)
+        # 只保留数值特征，不包含图像数据
+        numeric_all_spot_features = {k: v for k, v in all_spot_features.items() 
+                                   if k not in ['all_spot_centroids', 'all_white_binary_mask']}
+        features.update(numeric_all_spot_features)
+        
+        # 3. 撕裂面白色斑块特征
         spot_features = self.detect_white_spots(image, tear_mask)
         # 只保留数值特征，不包含图像数据
         numeric_spot_features = {k: v for k, v in spot_features.items() 
                                if k not in ['spot_centroids', 'white_binary_mask']}
         features.update(numeric_spot_features)
         
-        # 3. 边界粗糙度特征
+        # 4. 边界粗糙度特征
         roughness_features = self.calculate_edge_roughness(tear_mask, shear_mask)
         features.update(roughness_features)
         
-        # 4. 纹理特征
+        # 5. 纹理特征
         texture_features = self.calculate_texture_features(image, tear_mask, shear_mask)
         features.update(texture_features)
         
-        # 5. 添加时间戳（用于时序分析）
+        # 6. 添加时间戳（用于时序分析）
         import time
         features['timestamp'] = time.time()
         
@@ -325,8 +394,14 @@ class FeatureExtractor:
         spot_info = self.detect_white_spots(image, tear_mask)
         white_spots = spot_info['white_binary_mask']
         
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        # 检测所有白色斑块（未分割前）
+        all_spot_info = self.detect_all_white_spots(image)
+        all_white_spots = all_spot_info['all_white_binary_mask']
         
+        # 改为2行4列布局，增加整体白斑检测图像
+        fig, axes = plt.subplots(2, 4, figsize=(24, 12))
+        
+        # 第一行图像
         # 原始图像
         axes[0, 0].imshow(image, cmap='gray')
         axes[0, 0].set_title('原始图像')
@@ -342,13 +417,20 @@ class FeatureExtractor:
         axes[0, 1].set_title(f'分割结果\n撕裂面比例: {features["tear_ratio"]:.3f}')
         axes[0, 1].axis('off')
         
-        # 白色斑块
+        # 新增：分割前的白色斑块（整体）
         axes[0, 2].imshow(image, cmap='gray', alpha=0.7)
-        axes[0, 2].imshow(white_spots, cmap='Reds', alpha=0.8)
-        axes[0, 2].set_title(f'白色斑块\n数量: {features["spot_count"]}')
+        axes[0, 2].imshow(all_white_spots, cmap='Reds', alpha=0.8)
+        all_spot_count = all_spot_info['all_spot_count']
+        axes[0, 2].set_title(f'分割前整体白色斑块\n数量: {all_spot_count}')
         axes[0, 2].axis('off')
         
-        # 特征统计图表
+        # 撕裂面白色斑块
+        axes[0, 3].imshow(image, cmap='gray', alpha=0.7)
+        axes[0, 3].imshow(white_spots, cmap='Reds', alpha=0.8)
+        axes[0, 3].set_title(f'撕裂面白色斑块\n数量: {features["spot_count"]}')
+        axes[0, 3].axis('off')
+        
+        # 第二行特征统计图表
         # 比例特征
         ratios = [features['tear_ratio'], features['shear_ratio']]
         labels = ['撕裂面', '剪切面']
@@ -357,7 +439,7 @@ class FeatureExtractor:
         axes[1, 0].pie(ratios, labels=labels, colors=colors, autopct='%1.2f%%')
         axes[1, 0].set_title('表面比例分布')
         
-        # 特征对比
+        # 纹理特征对比
         feature_names = ['平均亮度', '标准差', '熵', '对比度']
         tear_values = [
             features.get('tear_mean_intensity', 0),
@@ -387,7 +469,8 @@ class FeatureExtractor:
         # 关键指标文本显示
         key_metrics = [
             f"撕裂面/剪切面比值: {features.get('tear_to_shear_ratio', 0):.3f}",
-            f"白斑密度: {features.get('spot_density', 0):.3f}",
+            f"撕裂面白斑密度: {features.get('spot_density', 0):.3f}",
+            f"整体白斑密度: {all_spot_info.get('all_spot_density', 0):.3f}",
             f"平均白斑大小: {features.get('average_spot_size', 0):.1f}",
             f"撕裂面粗糙度: {features.get('tear_area_roughness', 0):.3f}",
             f"剪切面粗糙度: {features.get('shear_area_roughness', 0):.3f}",
@@ -395,10 +478,17 @@ class FeatureExtractor:
         ]
         
         axes[1, 2].text(0.1, 0.9, '\n'.join(key_metrics), 
-                       transform=axes[1, 2].transAxes, fontsize=12,
+                       transform=axes[1, 2].transAxes, fontsize=10,
                        verticalalignment='top')
         axes[1, 2].set_title('关键指标')
         axes[1, 2].axis('off')
+        
+        # 第三列位置暂时为空或放置辅助信息
+        axes[1, 3].axis('off')
+        axes[1, 3].text(0.5, 0.5, f'整体检测白斑\n数量: {all_spot_count}', 
+                       transform=axes[1, 3].transAxes, fontsize=12,
+                       ha='center', va='center')
+        axes[1, 3].set_title('统计总结')
         
         plt.tight_layout()
         
