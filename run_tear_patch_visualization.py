@@ -43,22 +43,18 @@ def setup_chinese_font():
         if chinese_fonts:
             plt.rcParams['font.sans-serif'] = chinese_fonts + ['DejaVu Sans']
             plt.rcParams['axes.unicode_minus'] = False
-            print(f"设置中文字体: {chinese_fonts[0]}")
             return True
     
     elif system == "Windows":
         plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun', 'DejaVu Sans']
         plt.rcParams['axes.unicode_minus'] = False
-        print("设置Windows中文字体")
         return True
     
     else:  # Linux
         plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'Droid Sans Fallback', 'DejaVu Sans']
         plt.rcParams['axes.unicode_minus'] = False
-        print("设置Linux中文字体")
         return True
     
-    print("无法设置中文字体，将使用英文标签")
     return False
 
 def extract_frame_info(filename: str) -> int:
