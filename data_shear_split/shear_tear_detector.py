@@ -440,19 +440,19 @@ class ShearTearDetector:
                 row_tear = tear_mask[row, :]
                 row_shear = shear_mask[row, :]
                 
-            # 找到撕裂面最右边的位置
-            tear_pixels = np.where(row_tear)[0]
-            if len(tear_pixels) > 0:
-                tear_rightmost = np.max(tear_pixels)
-                # 从撕裂面最右边到左边界都算作撕裂面（取并集）
-                tear_mask[row, left_boundary:tear_rightmost+1] = True
-            
-            # 找到剪切面最左边的位置
-            shear_pixels = np.where(row_shear)[0]
-            if len(shear_pixels) > 0:
-                shear_leftmost = np.min(shear_pixels)
-                # 从剪切面最左边到右边界都算作剪切面（取并集）
-                shear_mask[row, shear_leftmost:right_boundary+1] = True
+                # 找到撕裂面最右边的位置
+                tear_pixels = np.where(row_tear)[0]
+                if len(tear_pixels) > 0:
+                    tear_rightmost = np.max(tear_pixels)
+                    # 从撕裂面最右边到左边界都算作撕裂面（取并集）
+                    tear_mask[row, left_boundary:tear_rightmost+1] = True
+                
+                # 找到剪切面最左边的位置
+                shear_pixels = np.where(row_shear)[0]
+                if len(shear_pixels) > 0:
+                    shear_leftmost = np.min(shear_pixels)
+                    # 从剪切面最左边到右边界都算作剪切面（取并集）
+                    shear_mask[row, shear_leftmost:right_boundary+1] = True
         
         # 确保最终mask包含原始检测区域（取并集）
         tear_mask = tear_mask | tear_mask_original
