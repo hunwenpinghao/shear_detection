@@ -30,6 +30,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'data_shear_split'))
 from feature_extractor import FeatureExtractor
 from config import PREPROCESS_CONFIG
 from shear_tear_detector import ShearTearDetector
+from spot_processor import SpotProcessor
 
 # 设置中文字体
 def setup_chinese_font():
@@ -76,6 +77,7 @@ class TearFilterTemporalAnalyzer:
         """初始化分析器"""
         self.feature_extractor = FeatureExtractor(PREPROCESS_CONFIG)
         self.shear_tear_detector = ShearTearDetector()
+        self.spot_processor = SpotProcessor()
         self.data = []
         
     def extract_frame_info(self, filename: str) -> int:
@@ -108,6 +110,115 @@ class TearFilterTemporalAnalyzer:
         tear_region[shear_mask > 0] = 0  # 将剪切面区域设为黑色
         
         return tear_region, shear_mask
+    
+    def create_tear_patch_visualization(self, original_image, filtered_tear_region, spot_result, output_dir, frame_num):
+        """
+        创建撕裂面斑块可视化图
+        
+        Args:
+            original_image: 原始ROI图像
+            filtered_tear_region: 过滤后的撕裂面区域
+            spot_result: 斑块检测结果
+            output_dir: 输出目录
+            frame_num: 帧号
+        """
+        # 设置中文字体
+        font_success = setup_chinese_font()
+        
+        # 创建2x2子图
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle(f'撕裂面斑块可视化 - Frame {frame_num:06d}', fontsize=16)
+        
+        # 子图1: 原始ROI图像
+        axes[0, 0].imshow(original_image, cmap='gray')
+        axes[0, 0].set_title('原始ROI图像' if font_success else 'Original ROI Image')
+        axes[0, 0].axis('off')
+        
+        # 子图2: 过滤后的撕裂面区域
+        axes[0, 1].imshow(filtered_tear_region, cmap='gray')
+        axes[0, 1].set_title('过滤后的撕裂面区域' if font_success else 'Filtered Tear Region')
+        axes[0, 1].axis('off')
+        
+        # 子图3: 斑块检测结果
+        if spot_result.get('success', False):
+            # 读取生成的斑块图
+            patch_image_path = os.path.join(output_dir, f"tear_patches_frame_{frame_num:06d}.png")
+            if os.path.exists(patch_image_path):
+                patch_image = cv2.imread(patch_image_path, cv2.IMREAD_COLOR)
+                if patch_image is not None:
+                    patch_image_rgb = cv2.cvtColor(patch_image, cv2.COLOR_BGR2RGB)
+                    axes[1, 0].imshow(patch_image_rgb)
+                    axes[1, 0].set_title('斑块检测结果' if font_success else 'Patch Detection Result')
+                else:
+                    axes[1, 0].imshow(filtered_tear_region, cmap='gray')
+                    axes[1, 0].set_title('斑块图读取失败' if font_success else 'Failed to Read Patch Image')
+            else:
+                axes[1, 0].imshow(filtered_tear_region, cmap='gray')
+                axes[1, 0].set_title('斑块图不存在' if font_success else 'Patch Image Not Found')
+        else:
+            axes[1, 0].imshow(filtered_tear_region, cmap='gray')
+            axes[1, 0].set_title('斑块检测失败' if font_success else 'Patch Detection Failed')
+        axes[1, 0].axis('off')
+        
+        # 子图4: 叠加可视化
+        # 将原始图像转换为RGB
+        original_rgb = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
+        
+        # 创建叠加图像
+        overlay = original_rgb.copy()
+        
+        # 在过滤后的撕裂面区域上叠加红色
+        tear_mask = filtered_tear_region > 0
+        overlay[tear_mask] = [255, 0, 0]  # 红色表示撕裂面区域
+        
+        # 如果有斑块检测结果，在斑块上叠加绿色
+        if spot_result.get('success', False):
+            # 读取生成的斑块图来获取斑块位置
+            patch_image_path = os.path.join(output_dir, f"tear_patches_frame_{frame_num:06d}.png")
+            if os.path.exists(patch_image_path):
+                patch_image = cv2.imread(patch_image_path, cv2.IMREAD_COLOR)
+                if patch_image is not None:
+                    # 将斑块图转换为灰度图，找到红色区域（斑块）
+                    patch_gray = cv2.cvtColor(patch_image, cv2.COLOR_BGR2GRAY)
+                    # 红色通道通常对应斑块区域
+                    spot_mask = patch_gray > 100  # 阈值可根据实际情况调整
+                    overlay[spot_mask] = [0, 255, 0]  # 绿色表示检测到的斑块
+        
+        # 混合显示
+        alpha = 0.6
+        blended = cv2.addWeighted(original_rgb, 1-alpha, overlay, alpha, 0)
+        
+        axes[1, 1].imshow(blended)
+        axes[1, 1].set_title('叠加可视化\n(红: 撕裂面, 绿: 斑块)' if font_success else 'Overlay Visualization\n(Red: Tear, Green: Patches)')
+        axes[1, 1].axis('off')
+        
+        # 添加统计信息
+        if spot_result.get('success', False):
+            patch_count = spot_result.get('spot_count', 0)
+            patch_density = spot_result.get('spot_density', 0.0)
+        else:
+            patch_count = 0
+            patch_density = 0.0
+        
+        stats_text = f"""
+统计信息:
+斑块数量: {patch_count}
+斑块密度: {patch_density:.6f}
+撕裂面像素: {np.sum(tear_mask)}
+        """
+        
+        fig.text(0.02, 0.02, stats_text, fontsize=10, 
+                bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8),
+                verticalalignment='bottom')
+        
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.15)
+        
+        # 保存可视化图
+        viz_filename = f"tear_patch_visualization_frame_{frame_num:06d}.png"
+        viz_path = os.path.join(output_dir, viz_filename)
+        plt.savefig(viz_path, dpi=300, bbox_inches='tight')
+        plt.close()
     
     def analyze_roi_spots_with_tear_filter(self, roi_dir: str, output_dir: str = "output") -> List[Dict[str, Any]]:
         """
@@ -208,24 +319,36 @@ class TearFilterTemporalAnalyzer:
                     filtered_path = os.path.join(step2_dir, filtered_filename)
                     cv2.imwrite(filtered_path, filtered_tear_region)
                     
-                    # 检测斑块
-                    spot_result = self.feature_extractor.detect_all_white_spots(filtered_tear_region)
+                    # 使用SpotProcessor生成斑块可视化图
+                    patch_filename = f"tear_patches_frame_{frame_num:06d}.png"
+                    patch_path = os.path.join(step2_dir, patch_filename)
                     
-                    # 保存斑块检测结果图
-                    if 'spot_image' in spot_result:
-                        patch_filename = f"tear_patches_frame_{frame_num:06d}.png"
-                        patch_path = os.path.join(step2_dir, patch_filename)
-                        cv2.imwrite(patch_path, spot_result['spot_image'])
+                    # 使用SpotProcessor处理单个ROI图像
+                    spot_result = self.spot_processor.process_single_roi_spots(roi_file, patch_path)
+                    
+                    # 创建撕裂面斑块可视化图
+                    self.create_tear_patch_visualization(roi_image, filtered_tear_region, spot_result, step2_dir, frame_num)
                     
                     # 提取关键信息
-                    result_data = {
-                        'frame_num': frame_num,
-                        'time_seconds': frame_num * 5,  # 假设每5秒一帧
-                        'spot_count': spot_result.get('all_spot_count', 0),
-                        'spot_density': spot_result.get('all_spot_density', 0.0),
-                        'image_shape': roi_image.shape,
-                        'roi_file': roi_file
-                    }
+                    if spot_result['success']:
+                        result_data = {
+                            'frame_num': frame_num,
+                            'time_seconds': frame_num * 5,  # 假设每5秒一帧
+                            'spot_count': spot_result.get('spot_count', 0),
+                            'spot_density': spot_result.get('spot_density', 0.0),
+                            'image_shape': roi_image.shape,
+                            'roi_file': roi_file
+                        }
+                    else:
+                        # 如果斑块检测失败，使用默认值
+                        result_data = {
+                            'frame_num': frame_num,
+                            'time_seconds': frame_num * 5,
+                            'spot_count': 0,
+                            'spot_density': 0.0,
+                            'image_shape': roi_image.shape,
+                            'roi_file': roi_file
+                        }
                     
                     results.append(result_data)
                     
