@@ -86,7 +86,9 @@ class FeatureExtractor:
         
         # 只在掩码区域内检测毛刺
         if mask is not None:
-            work_image = cv2.bitwise_and(image, mask)
+            # 将布尔mask转换为uint8图像用于位运算
+            mask_uint8 = (mask * 255).astype(np.uint8)
+            work_image = cv2.bitwise_and(image, mask_uint8)
         else:
             work_image = image.copy()
         
