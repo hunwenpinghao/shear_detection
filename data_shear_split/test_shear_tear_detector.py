@@ -203,7 +203,6 @@ def create_feature_comparison_plot(results):
                         bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
     plt.tight_layout()
-    plt.show()
 
 def main():
     """主函数"""

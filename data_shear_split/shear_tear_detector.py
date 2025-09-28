@@ -557,7 +557,6 @@ class ShearTearDetector:
         self.plot_feature_bars(axes[1, 2], features)
         
         plt.tight_layout()
-        plt.show()
     
     def plot_feature_radar(self, ax, features):
         """绘制特征雷达图"""
