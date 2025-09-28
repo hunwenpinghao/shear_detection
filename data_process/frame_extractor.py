@@ -11,6 +11,7 @@ import os
 import time
 import numpy as np
 from typing import Optional, Tuple
+import sys
 
 
 class FrameExtractor:
@@ -162,11 +163,13 @@ class FrameExtractor:
             return {"error": str(e)}
 
 
-def main():
+def main(video_path: str=None, output_dir: str=None):
     """主函数 - 处理指定的视频文件"""
     # 设置路径
-    video_path = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/Video_20250821110325928.avi"
-    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/images"
+    if video_path is None:
+        video_path = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/Video_20250821110325928.avi"
+    if output_dir is None:
+        output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/images"
     
     # 检查视频文件存在性
     if not os.path.exists(video_path):
@@ -207,4 +210,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    video_path = None
+    output_dir = None
+    if len(sys.argv) > 1:
+        video_path = str(sys.argv[1])
+    if len(sys.argv) > 2:
+        output_dir = str(sys.argv[2])
+    main(video_path, output_dir)
+    
