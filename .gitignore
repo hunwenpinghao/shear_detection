@@ -1,0 +1,16 @@
+/data/*bmp
+/data/*avi
+/output/
+*.avi
+*.mp4
+*.jpg
+*.png
+data/*/*jpg
+data/*/*png
+data/bankuai/
+*/*.jpg
+*/*.png
+data_replot_tear_density_curve/
+*.pyc
+.DS_Store
+*__pycache__/
