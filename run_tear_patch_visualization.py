@@ -291,14 +291,10 @@ def main():
     # 存储分析结果
     analysis_results = []
     
-    for i, input_file in enumerate(input_files):
+    for i, input_file in enumerate(tqdm(input_files, desc="处理撕裂面斑块和纹理分析", unit="图像")):
         frame_num = extract_frame_info(input_file)
         if frame_num == -1:
             continue
-            
-        # 显示进度
-        if i % 100 == 0:
-            print(f"处理进度: {i}/{len(input_files)} ({i/len(input_files)*100:.1f}%)")
             
         try:
             # 读取过滤后的撕裂面区域图像
@@ -332,7 +328,7 @@ def main():
             }
             analysis_results.append(result)
             
-            # 调试信息
+            # 调试信息（仅前几个图像）
             if frame_num <= 5:
                 print(f"Frame {frame_num}: 纹理密度: {texture_density:.6f}, 斑块数量: {result['spot_count']}")
                 
