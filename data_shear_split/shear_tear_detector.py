@@ -15,6 +15,43 @@ from skimage.feature import local_binary_pattern
 import warnings
 warnings.filterwarnings('ignore')
 
+# 设置中文字体支持
+import matplotlib
+import matplotlib.font_manager as fm
+
+# 检查系统可用的中文字体
+def get_chinese_fonts():
+    """获取系统可用的中文字体"""
+    chinese_fonts = []
+    for font in fm.fontManager.ttflist:
+        font_name = font.name
+        if any(keyword in font_name.lower() for keyword in ['simhei', 'microsoft', 'yahei', 'song', 'kai', 'fang', 'hei']):
+            chinese_fonts.append(font_name)
+    return list(set(chinese_fonts))
+
+# 获取可用中文字体
+available_fonts = get_chinese_fonts()
+print(f"可用中文字体: {available_fonts}")
+
+# 设置字体优先级
+font_candidates = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'DejaVu Sans', 'Arial Unicode MS']
+if available_fonts:
+    font_candidates = available_fonts[:3] + font_candidates
+
+matplotlib.rcParams['font.sans-serif'] = font_candidates
+matplotlib.rcParams['axes.unicode_minus'] = False
+matplotlib.rcParams['font.size'] = 10
+
+# 清除字体缓存
+try:
+    fm._rebuild()
+except AttributeError:
+    # 对于较新版本的matplotlib，使用不同的方法
+    try:
+        fm.fontManager.__init__()
+    except:
+        pass
+
 class ShearTearDetector:
     def __init__(self):
         """初始化检测器"""
@@ -458,26 +495,30 @@ class ShearTearDetector:
         tear_mask = tear_mask | tear_mask_original
         shear_mask = shear_mask | shear_mask_original
         
+        # 保存填充前的结果
+        tear_mask_before_fill = tear_mask.copy()
+        shear_mask_before_fill = shear_mask.copy()
+        
         # 应用形态学操作平滑区域
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        tear_mask = cv2.morphologyEx(tear_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
-        shear_mask = cv2.morphologyEx(shear_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+        tear_mask_after_fill = cv2.morphologyEx(tear_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+        shear_mask_after_fill = cv2.morphologyEx(shear_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
         
         # 去除重叠区域
-        overlap = tear_mask & shear_mask
-        tear_mask = tear_mask - overlap
-        shear_mask = shear_mask - overlap
+        overlap = tear_mask_after_fill & shear_mask_after_fill
+        tear_mask_final = tear_mask_after_fill - overlap
+        shear_mask_final = shear_mask_after_fill - overlap
         
         # 填充分割结果
-        segmented_image[tear_mask > 0] = 128  # 灰色表示撕裂面
-        segmented_image[shear_mask > 0] = 255  # 白色表示剪切面
+        segmented_image[tear_mask_final > 0] = 128  # 灰色表示撕裂面
+        segmented_image[shear_mask_final > 0] = 255  # 白色表示剪切面
         
         # 创建标签图
         labels = np.zeros_like(image, dtype=np.int32)
-        labels[tear_mask > 0] = 1
-        labels[shear_mask > 0] = 2
+        labels[tear_mask_final > 0] = 1
+        labels[shear_mask_final > 0] = 2
         
-        return segmented_image, labels, otsu_mask, inner_mask
+        return segmented_image, labels, otsu_mask, inner_mask, tear_mask_final, shear_mask_final, tear_mask_before_fill, shear_mask_before_fill, tear_mask_after_fill, shear_mask_after_fill
     
     def detect_surfaces(self, image, visualize=True):
         """检测撕裂面和剪切面"""
@@ -488,12 +529,17 @@ class ShearTearDetector:
         surface_type, confidence = self.classify_surface_type(features)
         
         # 区域分割
-        segmented_image, labels, otsu_mask, inner_mask = self.segment_surfaces(image)
+        segmented_image, labels, otsu_mask, inner_mask, tear_mask_final, shear_mask_final, tear_mask_before_fill, shear_mask_before_fill, tear_mask_after_fill, shear_mask_after_fill = self.segment_surfaces(image)
         
-        if visualize:
-            self.visualize_results(image, features, surface_type, confidence, intermediate_results, segmented_image, otsu_mask, inner_mask)
+        # 将分割mask添加到intermediate_results中
+        intermediate_results['tear_mask'] = tear_mask_final
+        intermediate_results['shear_mask'] = shear_mask_final
+        intermediate_results['tear_mask_before_fill'] = tear_mask_before_fill
+        intermediate_results['shear_mask_before_fill'] = shear_mask_before_fill
+        intermediate_results['tear_mask_after_fill'] = tear_mask_after_fill
+        intermediate_results['shear_mask_after_fill'] = shear_mask_after_fill
         
-        return {
+        result = {
             'surface_type': surface_type,
             'confidence': confidence,
             'features': features,
@@ -503,6 +549,123 @@ class ShearTearDetector:
             'otsu_mask': otsu_mask,
             'inner_mask': inner_mask
         }
+        
+        if visualize:
+            # 使用现有的可视化方法
+            self.visualize_results(image, features, surface_type, confidence, intermediate_results, segmented_image, otsu_mask, inner_mask)
+            
+            # 创建对比可视化图像用于保存
+            comparison_visualization = self.create_comparison_visualization(image, intermediate_results, surface_type, confidence)
+            result['visualization'] = comparison_visualization
+        
+        return result
+    
+    def create_simple_visualization(self, original_image, features, surface_type, confidence, intermediate_results, segmented_image=None, otsu_mask=None, inner_mask=None):
+        """创建简化的可视化图像用于保存（基于现有的visualize_results逻辑）"""
+        # 创建RGB图像
+        original_rgb = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
+        
+        # 检查是否有分割结果
+        if segmented_image is not None and 'tear_mask' in intermediate_results and 'shear_mask' in intermediate_results:
+            # 使用与visualize_results相同的逻辑
+            combined_overlay = original_rgb.copy()
+            combined_overlay[intermediate_results['tear_mask'] > 0] = [255, 0, 0]  # 撕裂面：红色
+            combined_overlay[intermediate_results['shear_mask'] > 0] = [0, 0, 255]  # 剪切面：蓝色
+            
+            # 使用透明度混合（与matplotlib的alpha=0.5对应）
+            result_image = cv2.addWeighted(original_rgb, 0.5, combined_overlay, 0.5, 0)
+        else:
+            result_image = original_rgb
+        
+        # 添加文本标注
+        cv2.putText(result_image, f'{surface_type.upper()}', (10, 25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
+        cv2.putText(result_image, f'Confidence: {confidence:.3f}', (10, 45), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+        
+        return result_image
+    
+    def create_comparison_visualization(self, original_image, intermediate_results, surface_type, confidence):
+        """创建分割过程对比可视化"""
+        # 创建RGB图像
+        original_rgb = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
+        
+        # 获取不同阶段的mask
+        tear_before = intermediate_results.get('tear_mask_before_fill', np.zeros_like(original_image, dtype=bool))
+        shear_before = intermediate_results.get('shear_mask_before_fill', np.zeros_like(original_image, dtype=bool))
+        tear_after = intermediate_results.get('tear_mask_after_fill', np.zeros_like(original_image, dtype=bool))
+        shear_after = intermediate_results.get('shear_mask_after_fill', np.zeros_like(original_image, dtype=bool))
+        tear_final = intermediate_results.get('tear_mask', np.zeros_like(original_image, dtype=bool))
+        shear_final = intermediate_results.get('shear_mask', np.zeros_like(original_image, dtype=bool))
+        
+        # 创建对比图
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle(f'Segmentation Process Comparison - {surface_type.upper()} (Confidence: {confidence:.3f})', fontsize=16)
+        
+        # 第一行：Before Fill
+        axes[0, 0].imshow(original_rgb)
+        axes[0, 0].set_title('Original Image')
+        axes[0, 0].axis('off')
+        
+        # Before Fill - 撕裂面
+        before_tear_overlay = original_rgb.copy()
+        before_tear_overlay[tear_before] = [255, 0, 0]  # 红色
+        axes[0, 1].imshow(original_rgb)
+        axes[0, 1].imshow(before_tear_overlay, alpha=0.5)
+        axes[0, 1].set_title('Before Fill - Tear Surface')
+        axes[0, 1].axis('off')
+        
+        # Before Fill - 剪切面
+        before_shear_overlay = original_rgb.copy()
+        before_shear_overlay[shear_before] = [0, 0, 255]  # 蓝色
+        axes[0, 2].imshow(original_rgb)
+        axes[0, 2].imshow(before_shear_overlay, alpha=0.5)
+        axes[0, 2].set_title('Before Fill - Shear Surface')
+        axes[0, 2].axis('off')
+        
+        # 第二行：After Fill
+        # After Fill - 撕裂面
+        after_tear_overlay = original_rgb.copy()
+        after_tear_overlay[tear_after] = [255, 0, 0]  # 红色
+        axes[1, 0].imshow(original_rgb)
+        axes[1, 0].imshow(after_tear_overlay, alpha=0.5)
+        axes[1, 0].set_title('After Fill - Tear Surface')
+        axes[1, 0].axis('off')
+        
+        # After Fill - 剪切面
+        after_shear_overlay = original_rgb.copy()
+        after_shear_overlay[shear_after] = [0, 0, 255]  # 蓝色
+        axes[1, 1].imshow(original_rgb)
+        axes[1, 1].imshow(after_shear_overlay, alpha=0.5)
+        axes[1, 1].set_title('After Fill - Shear Surface')
+        axes[1, 1].axis('off')
+        
+        # 最终结果
+        final_overlay = original_rgb.copy()
+        final_overlay[tear_final] = [255, 0, 0]  # 红色撕裂面
+        final_overlay[shear_final] = [0, 0, 255]  # 蓝色剪切面
+        axes[1, 2].imshow(original_rgb)
+        axes[1, 2].imshow(final_overlay, alpha=0.5)
+        axes[1, 2].set_title('Final Result')
+        axes[1, 2].axis('off')
+        
+        plt.tight_layout()
+        
+        # 转换为OpenCV格式用于保存
+        fig.canvas.draw()
+        
+        # 获取图像数据
+        buf = fig.canvas.buffer_rgba()
+        img_array = np.asarray(buf)
+        
+        # 转换为RGB格式
+        img_rgb = img_array[:, :, :3]  # 去掉alpha通道
+        
+        # 转换为BGR格式
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        
+        plt.close(fig)
+        return img_bgr
     
     def visualize_results(self, original_image, features, surface_type, confidence, intermediate_results, segmented_image=None, otsu_mask=None, inner_mask=None):
         """可视化检测结果"""
@@ -536,7 +699,7 @@ class ShearTearDetector:
         # 区域分割结果叠加可视化
         if segmented_image is not None:
             # 分割结果叠加可视化
-            original_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+            original_rgb = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
             combined_overlay = original_rgb.copy()
             combined_overlay[intermediate_results['tear_mask'] > 0] = [255, 0, 0]  # 撕裂面：红色
             combined_overlay[intermediate_results['shear_mask'] > 0] = [0, 0, 255]  # 剪切面：蓝色
@@ -580,7 +743,7 @@ class ShearTearDetector:
         ax.set_xticks(angles[:-1])
         ax.set_xticklabels(labels)
         ax.set_ylim(0, 1)
-        ax.set_title('关键特征雷达图')
+        ax.set_title('Key Features Radar Chart')
         ax.grid(True)
     
     def plot_feature_bars(self, ax, features):
@@ -598,8 +761,8 @@ class ShearTearDetector:
         bars = ax.barh(range(len(names)), values)
         ax.set_yticks(range(len(names)))
         ax.set_yticklabels(names)
-        ax.set_xlabel('特征值')
-        ax.set_title('主要特征值')
+        ax.set_xlabel('Feature Values')
+        ax.set_title('Main Feature Values')
         
         # 颜色编码
         for i, (name, value) in enumerate(sorted_features):
