@@ -20,6 +20,9 @@ from datetime import datetime
 
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # 使用无界面后端，便于批量保存
+import matplotlib.pyplot as plt
 
 
 def detect_left_right_edges(binary_image: np.ndarray):
@@ -114,58 +117,28 @@ def process_one_image(image_path: str, output_dir: str) -> dict:
     edges_bgr = cv2.cvtColor(edges_vis, cv2.COLOR_RGB2BGR)
     final_bgr = cv2.cvtColor(filled_mask, cv2.COLOR_GRAY2BGR)
 
-    # 独立面板 + 间距 + 标题（红色无背景）+ 箭头
-    title_margin = 40
-    gutter = 56  # 面板间距（加大间距以拉开四张图）
+    # 使用 matplotlib 1x4 横排子图展示，并保存
     h, w = original_bgr.shape[:2]
-    panel_w = w
-    panel_h = h
-
-    canvas_h = panel_h + title_margin
-    canvas_w = panel_w * 4 + gutter * 3
-    canvas = np.full((canvas_h, canvas_w, 3), 255, dtype=np.uint8)
-
-    # 面板左上角 x 坐标
-    x_offsets = [0,
-                 panel_w + gutter,
-                 2 * (panel_w + gutter),
-                 3 * (panel_w + gutter)]
-
-    # 放置四个面板
-    panels = [original_bgr, otsu_bgr, edges_bgr, final_bgr]
-    for i, p in enumerate(panels):
-        x0 = x_offsets[i]
-        canvas[title_margin:title_margin + panel_h, x0:x0 + panel_w] = p
-
-    # 标题（红色）
     titles = ["Original", "Otsu", "Edges", "Final"]
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.7
-    thickness = 2
-    title_color = (0, 0, 255)  # 红色（BGR）
-    for i, text in enumerate(titles):
-        x0 = x_offsets[i]
-        text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
-        text_x = x0 + (panel_w - text_size[0]) // 2
-        text_y = (title_margin + text_size[1]) // 2
-        cv2.putText(canvas, text, (text_x, text_y), font, font_scale, title_color, thickness, cv2.LINE_AA)
 
-    # 箭头（红色更显眼，尺寸更小），位于相邻面板之间的留白区域中部
-    arrow_color = (0, 0, 255)  # 红色（BGR）
-    arrow_thickness = 2
-    y_mid = title_margin + panel_h // 2
-    for i in range(3):
-        x_right_of_left_panel = x_offsets[i] + panel_w
-        x_left_of_right_panel = x_offsets[i + 1]
-        # 在留白区域中居中放置短箭头
-        gap = x_left_of_right_panel - x_right_of_left_panel
-        center_x = x_right_of_left_panel + gap // 2
-        half_len = max(12, min(gap // 4, 24))  # 控制箭头长度更短
-        x_start = center_x - half_len
-        x_end = center_x + half_len
-        cv2.arrowedLine(canvas, (x_start, y_mid), (x_end, y_mid), arrow_color, arrow_thickness, tipLength=0.2)
+    # 转 RGB 以正确显示颜色
+    original_rgb = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2RGB)
+    otsu_rgb = cv2.cvtColor(otsu_bgr, cv2.COLOR_BGR2RGB)
+    edges_rgb = cv2.cvtColor(edges_bgr, cv2.COLOR_BGR2RGB)
+    final_rgb = cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB)
 
-    cv2.imwrite(combined_path, canvas)
+    fig, axes = plt.subplots(1, 4, figsize=(4 * w / 100.0, h / 100.0), dpi=100)
+    ax_list = [axes[0], axes[1], axes[2], axes[3]]
+    img_list = [original_rgb, otsu_rgb, edges_rgb, final_rgb]
+
+    for ax, img, title in zip(ax_list, img_list, titles):
+        ax.imshow(img)
+        ax.set_title(title, color='red', fontsize=12)
+        ax.axis('off')
+
+    fig.tight_layout()
+    fig.savefig(combined_path, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
 
     # 统计
     stats = compute_stats(image_name, otsu_binary, left_edges, right_edges, filled_mask)
