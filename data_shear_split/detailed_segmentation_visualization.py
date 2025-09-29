@@ -28,8 +28,30 @@ def create_detailed_segmentation_visualization(image_path, output_path):
     # 预处理
     processed = detector.preprocess_image(image)
     
-    # 创建Otsu二值化mask
-    _, otsu_mask = cv2.threshold(processed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 创建Otsu二值化mask（与 generate_final_mask.py 一致：对原图做 Otsu 并按左右边缘填充）
+    # 1) 对原始灰度图像进行 Otsu 二值化
+    _, otsu_binary = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # 2) 逐行检测左右边缘（白色=255）
+    left_edges = []
+    right_edges = []
+    for row in range(otsu_binary.shape[0]):
+        row_pixels = otsu_binary[row, :]
+        white_pixels = np.where(row_pixels == 255)[0]
+        if len(white_pixels) > 0:
+            left_edges.append((row, int(white_pixels[0])))
+            right_edges.append((row, int(white_pixels[-1])))
+        else:
+            left_edges.append((row, -1))
+            right_edges.append((row, -1))
+    
+    # 3) 基于左右边缘在两者之间填充，得到最终的 otsu_mask
+    otsu_mask = np.zeros_like(otsu_binary, dtype=np.uint8)
+    for i, (left_row, left_col) in enumerate(left_edges):
+        if left_col != -1 and i < len(right_edges):
+            _, right_col = right_edges[i]
+            if right_col != -1 and right_col >= left_col:
+                otsu_mask[left_row, left_col:right_col + 1] = 255
     
     # 创建内部区域mask（排除白色区域的边缘）
     # 使用形态学腐蚀操作缩小白色区域
