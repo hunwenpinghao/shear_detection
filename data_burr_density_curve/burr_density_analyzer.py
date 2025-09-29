@@ -593,11 +593,18 @@ class BurrDensityAnalyzer:
 
 def main():
     """主函数"""
+    import sys
     
     # 设置路径
     roi_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs"
     output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_burr_density_curve"
     
+    if len(sys.argv) > 1:
+        roi_dir = sys.argv[1]
+    
+    if len(sys.argv) > 2:
+        output_dir = sys.argv[2]
+
     # 创建分析器
     analyzer = BurrDensityAnalyzer()
     

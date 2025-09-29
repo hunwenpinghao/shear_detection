@@ -101,9 +101,23 @@ def test_binarization_effects(image_path, output_path):
     
     # 创建填充mask
     filled_mask = create_filled_mask(left_edges, right_edges, processed_otsu_on_original.shape)
+    
+    # 应用mask到Adaptive Mean和Adaptive Gaussian结果上
+    def apply_mask_to_binarization(binary_result, mask):
+        """将mask应用到二值化结果上，只保留mask区域内的内容"""
+        filtered_result = binary_result.copy()
+        # 将mask区域外的像素设为黑色（0）
+        filtered_result[mask == 0] = 0
+        return filtered_result
+    
+    # 生成不同二值化方法的结果
     processed_adaptive_mean = preprocess_with_binarization(image, 'adaptive_mean')
     processed_adaptive_gaussian = preprocess_with_binarization(image, 'adaptive_gaussian')
     processed_fixed = preprocess_with_binarization(image, 'fixed')
+    
+    # 生成过滤后的结果
+    filtered_adaptive_mean = apply_mask_to_binarization(processed_adaptive_mean, filled_mask)
+    filtered_adaptive_gaussian = apply_mask_to_binarization(processed_adaptive_gaussian, filled_mask)
     
     # 创建可视化（扩展为 2x4，加入“原图直接 Otsu”）
     fig, axes = plt.subplots(2, 4, figsize=(22, 12))
@@ -139,13 +153,13 @@ def test_binarization_effects(image_path, output_path):
     axes[0, 3].set_title('Otsu on Original\nwith Edge Detection')
     axes[0, 3].axis('off')
     
-    # 第二行：不同二值化方法
-    axes[1, 0].imshow(processed_adaptive_mean, cmap='gray')
-    axes[1, 0].set_title('Adaptive Mean\nBinarization')
+    # 第二行：过滤后的二值化方法
+    axes[1, 0].imshow(filtered_adaptive_mean, cmap='gray')
+    axes[1, 0].set_title('Filtered Adaptive Mean\n(Mask Applied)')
     axes[1, 0].axis('off')
     
-    axes[1, 1].imshow(processed_adaptive_gaussian, cmap='gray')
-    axes[1, 1].set_title('Adaptive Gaussian\nBinarization')
+    axes[1, 1].imshow(filtered_adaptive_gaussian, cmap='gray')
+    axes[1, 1].set_title('Filtered Adaptive Gaussian\n(Mask Applied)')
     axes[1, 1].axis('off')
     
     axes[1, 2].imshow(processed_fixed, cmap='gray')
@@ -183,13 +197,15 @@ White Pixels: {np.sum(filled_mask == 255):,}
 Black Pixels: {np.sum(filled_mask == 0):,}
 Fill Ratio: {np.sum(filled_mask == 255) / (filled_mask.shape[0] * filled_mask.shape[1]) * 100:.1f}%
 
-Adaptive Mean:
-Mean: {np.mean(processed_adaptive_mean):.1f}
-White Pixels: {np.sum(processed_adaptive_mean == 255):,}
+Filtered Adaptive Mean:
+Mean: {np.mean(filtered_adaptive_mean):.1f}
+White Pixels: {np.sum(filtered_adaptive_mean == 255):,}
+Black Pixels: {np.sum(filtered_adaptive_mean == 0):,}
 
-Adaptive Gaussian:
-Mean: {np.mean(processed_adaptive_gaussian):.1f}
-White Pixels: {np.sum(processed_adaptive_gaussian == 255):,}
+Filtered Adaptive Gaussian:
+Mean: {np.mean(filtered_adaptive_gaussian):.1f}
+White Pixels: {np.sum(filtered_adaptive_gaussian == 255):,}
+Black Pixels: {np.sum(filtered_adaptive_gaussian == 0):,}
 
 Fixed Threshold:
 Mean: {np.mean(processed_fixed):.1f}
