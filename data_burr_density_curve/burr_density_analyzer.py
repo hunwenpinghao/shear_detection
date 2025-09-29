@@ -247,7 +247,9 @@ class BurrDensityAnalyzer:
         import sys
         sys.path.append('/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_shear_split')
         from shear_tear_detector import ShearTearDetector
-        detector = ShearTearDetector()
+        # 默认使用新的等高线方法，可通过参数控制
+        use_contour_method = True
+        detector = ShearTearDetector(use_contour_method=use_contour_method)
         
         # 第一步：生成撕裂面mask（before fill + after fill）
         print("\n第一步：生成撕裂面mask...")
@@ -262,19 +264,37 @@ class BurrDensityAnalyzer:
             if result and 'segmented_image' in result:
                 frame_num = self.extract_frame_info(image_path)
                 
-                # 保存before fill mask
-                if 'tear_mask_original' in result:
-                    before_fill_mask = result['tear_mask_original'].astype(np.uint8) * 255
-                    before_fill_filename = f"tear_mask_before_fill_frame_{frame_num:06d}.png"
-                    before_fill_path = os.path.join(step1_dir, before_fill_filename)
-                    cv2.imwrite(before_fill_path, before_fill_mask)
-                
-                # 保存after fill mask
-                segmented_image = result['segmented_image']
-                after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
-                after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
-                after_fill_path = os.path.join(step1_dir, after_fill_filename)
-                cv2.imwrite(after_fill_path, after_fill_mask)
+                # 根据使用的方法保存不同的mask
+                if use_contour_method:
+                    # 新方法：使用等高线方法的结果
+                    if 'tear_mask' in result.get('intermediate_results', {}):
+                        tear_mask = result['intermediate_results']['tear_mask']
+                        # 保存等高线方法生成的撕裂面mask
+                        contour_mask = tear_mask.astype(np.uint8) * 255
+                        contour_filename = f"tear_mask_contour_frame_{frame_num:06d}.png"
+                        contour_path = os.path.join(step1_dir, contour_filename)
+                        cv2.imwrite(contour_path, contour_mask)
+                        
+                        # 同时保存分割结果
+                        segmented_image = result['segmented_image']
+                        after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
+                        after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                        after_fill_path = os.path.join(step1_dir, after_fill_filename)
+                        cv2.imwrite(after_fill_path, after_fill_mask)
+                else:
+                    # 老方法：保存before fill和after fill mask
+                    if 'tear_mask_original' in result:
+                        before_fill_mask = result['tear_mask_original'].astype(np.uint8) * 255
+                        before_fill_filename = f"tear_mask_before_fill_frame_{frame_num:06d}.png"
+                        before_fill_path = os.path.join(step1_dir, before_fill_filename)
+                        cv2.imwrite(before_fill_path, before_fill_mask)
+                    
+                    # 保存after fill mask
+                    segmented_image = result['segmented_image']
+                    after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
+                    after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                    after_fill_path = os.path.join(step1_dir, after_fill_filename)
+                    cv2.imwrite(after_fill_path, after_fill_mask)
         
         print(f"第一步完成，撕裂面mask已保存到: {step1_dir}")
         

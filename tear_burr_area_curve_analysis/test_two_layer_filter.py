@@ -477,8 +477,23 @@ def main():
     setup_chinese_font()
     
     # 数据文件路径
-    data_path = "../data_burr_density_curve/burr_density_analysis.csv"
+    # data_path = "../data_burr_density_curve/burr_density_analysis.csv"
+    # output_dir = "test_output"
+
+    # first_cycle
+    data_path = "./data_video_20250821152112032/first_cycle/burr_density_curve/burr_density_analysis.csv"
+    output_dir = "./data_video_20250821152112032/first_cycle/hill_curve"
+
+    # second_cycle
+    # data_path = "./data_video_20250821152112032/second_cycle/burr_density_curve/burr_density_analysis.csv"
+    # output_dir = "./data_video_20250821152112032/second_cycle/hill_curve"
     
+    if len(sys.argv) > 1:
+        data_path = sys.argv[1]
+    
+    if len(sys.argv) > 2:
+        output_dir = sys.argv[2]
+
     if not os.path.exists(data_path):
         print(f"错误: 数据文件不存在: {data_path}")
         return
@@ -495,9 +510,9 @@ def main():
         print(f"{'='*80}")
         
         # 创建山丘分割和面积分析
-        hills, strong_smooth = analyzer.create_hill_analysis(column_to_analyze)
+        hills, strong_smooth = analyzer.create_hill_analysis(column_to_analyze, output_dir=output_dir)
         
-        print(f"\n分析完成！结果已保存到 test_output/hill_segmentation_analysis_{column_to_analyze}.png")
+        print(f"\n分析完成！结果已保存到 {output_dir}/hill_segmentation_analysis_{column_to_analyze}.png")
         print(f"成功将多个小山峰平滑成 {len(hills)} 个大山丘，并通过波谷位置进行了分割。")
     else:
         print(f"警告: 列 '{column_to_analyze}' 不存在于数据中")

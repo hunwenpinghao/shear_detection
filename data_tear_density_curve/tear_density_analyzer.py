@@ -148,7 +148,7 @@ class TearDensityAnalyzer:
         except (IndexError, ValueError):
             return -1
     
-    def process_images(self, roi_dir, output_dir):
+    def process_images(self, roi_dir, output_dir, use_contour_method=True):
         """按步骤处理所有图像"""
         
         print("开始分析撕裂面密度...")
@@ -181,10 +181,13 @@ class TearDensityAnalyzer:
         import sys
         sys.path.append('/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_shear_split')
         from shear_tear_detector import ShearTearDetector
-        detector = ShearTearDetector()
+        # 默认使用新的等高线方法，可通过参数控制
+        detector = ShearTearDetector(use_contour_method=use_contour_method)
         
         # 第一步：生成撕裂面mask（before fill + after fill）
         print("\n第一步：生成撕裂面mask...")
+        detection_results = {}  # 缓存检测结果，避免重复计算
+        
         for image_path in tqdm(image_files, desc="生成撕裂面mask", unit="图像"):
             # 读取图像
             image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -196,19 +199,40 @@ class TearDensityAnalyzer:
             if result and 'segmented_image' in result:
                 frame_num = self.extract_frame_info(image_path)
                 
-                # 保存before fill mask
-                if 'tear_mask_original' in result:
-                    before_fill_mask = result['tear_mask_original'].astype(np.uint8) * 255
-                    before_fill_filename = f"tear_mask_before_fill_frame_{frame_num:06d}.png"
-                    before_fill_path = os.path.join(step1_dir, before_fill_filename)
-                    cv2.imwrite(before_fill_path, before_fill_mask)
+                # 缓存检测结果
+                detection_results[frame_num] = result
                 
-                # 保存after fill mask
-                segmented_image = result['segmented_image']
-                after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
-                after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
-                after_fill_path = os.path.join(step1_dir, after_fill_filename)
-                cv2.imwrite(after_fill_path, after_fill_mask)
+                # 根据使用的方法保存不同的mask
+                if use_contour_method:
+                    # 新方法：使用等高线方法的结果
+                    if 'tear_mask' in result.get('intermediate_results', {}):
+                        tear_mask = result['intermediate_results']['tear_mask']
+                        # 保存等高线方法生成的撕裂面mask
+                        contour_mask = tear_mask.astype(np.uint8) * 255
+                        contour_filename = f"tear_mask_contour_frame_{frame_num:06d}.png"
+                        contour_path = os.path.join(step1_dir, contour_filename)
+                        cv2.imwrite(contour_path, contour_mask)
+                        
+                        # 同时保存分割结果
+                        segmented_image = result['segmented_image']
+                        after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
+                        after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                        after_fill_path = os.path.join(step1_dir, after_fill_filename)
+                        cv2.imwrite(after_fill_path, after_fill_mask)
+                else:
+                    # 老方法：保存before fill和after fill mask
+                    if 'tear_mask_original' in result:
+                        before_fill_mask = result['tear_mask_original'].astype(np.uint8) * 255
+                        before_fill_filename = f"tear_mask_before_fill_frame_{frame_num:06d}.png"
+                        before_fill_path = os.path.join(step1_dir, before_fill_filename)
+                        cv2.imwrite(before_fill_path, before_fill_mask)
+                    
+                    # 保存after fill mask
+                    segmented_image = result['segmented_image']
+                    after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
+                    after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                    after_fill_path = os.path.join(step1_dir, after_fill_filename)
+                    cv2.imwrite(after_fill_path, after_fill_mask)
         
         print(f"第一步完成，撕裂面mask已保存到: {step1_dir}")
         
@@ -220,36 +244,72 @@ class TearDensityAnalyzer:
             if image is None:
                 continue
                 
-            # 检测撕裂面
-            result = detector.detect_surfaces(image, visualize=False)
-            if result and 'segmented_image' in result:
-                frame_num = self.extract_frame_info(image_path)
-                
-                # 从分割结果中提取撕裂面mask
-                segmented_image = result['segmented_image']
-                tear_mask = (segmented_image == 128).astype(np.uint8) * 255
-                
-                # 应用mask过滤出撕裂面区域
-                tear_region = cv2.bitwise_and(image, image, mask=tear_mask)
-                
-                # 保存撕裂面区域
-                region_filename = f"tear_region_frame_{frame_num:06d}.png"
-                region_path = os.path.join(step2_dir, region_filename)
-                cv2.imwrite(region_path, tear_region)
-                
-                # 使用FeatureExtractor检测斑块
-                spot_result = self.feature_extractor.detect_all_white_spots(tear_region)
-                
-                # 保存斑块检测结果图
-                if 'spot_image' in spot_result:
-                    patch_filename = f"tear_patches_frame_{frame_num:06d}.png"
-                    patch_path = os.path.join(step2_dir, patch_filename)
-                    cv2.imwrite(patch_path, spot_result['spot_image'])
-                
-                # 分析撕裂面密度
-                analysis_result = self.analyze_tear_density(image_path, tear_mask)
-                if analysis_result:
-                    self.results.append(analysis_result)
+            frame_num = self.extract_frame_info(image_path)
+            
+            # 检查是否已有检测结果
+            if frame_num in detection_results:
+                result = detection_results[frame_num]
+                # 根据使用的方法提取撕裂面mask
+                if use_contour_method:
+                    # 新方法：从等高线结果中提取撕裂面mask
+                    if 'tear_mask' in result.get('intermediate_results', {}):
+                        tear_mask = result['intermediate_results']['tear_mask'].astype(np.uint8) * 255
+                    else:
+                        # 回退到分割结果
+                        segmented_image = result['segmented_image']
+                        tear_mask = (segmented_image == 128).astype(np.uint8) * 255
+                else:
+                    # 老方法：从分割结果中提取撕裂面mask
+                    segmented_image = result['segmented_image']
+                    tear_mask = (segmented_image == 128).astype(np.uint8) * 255
+            else:
+                # 如果没有缓存结果，则从第一步保存的mask文件中读取
+                if use_contour_method:
+                    # 新方法：优先读取等高线mask
+                    contour_filename = f"tear_mask_contour_frame_{frame_num:06d}.png"
+                    contour_path = os.path.join(step1_dir, contour_filename)
+                    if os.path.exists(contour_path):
+                        tear_mask = cv2.imread(contour_path, cv2.IMREAD_GRAYSCALE)
+                    else:
+                        # 回退到after fill mask
+                        after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                        after_fill_path = os.path.join(step1_dir, after_fill_filename)
+                        if os.path.exists(after_fill_path):
+                            tear_mask = cv2.imread(after_fill_path, cv2.IMREAD_GRAYSCALE)
+                        else:
+                            print(f"警告：未找到帧 {frame_num} 的撕裂面mask，跳过处理")
+                            continue
+                else:
+                    # 老方法：读取after fill mask
+                    after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                    after_fill_path = os.path.join(step1_dir, after_fill_filename)
+                    if os.path.exists(after_fill_path):
+                        tear_mask = cv2.imread(after_fill_path, cv2.IMREAD_GRAYSCALE)
+                    else:
+                        print(f"警告：未找到帧 {frame_num} 的撕裂面mask，跳过处理")
+                        continue
+            
+            # 应用mask过滤出撕裂面区域
+            tear_region = cv2.bitwise_and(image, image, mask=tear_mask)
+            
+            # 保存撕裂面区域
+            region_filename = f"tear_region_frame_{frame_num:06d}.png"
+            region_path = os.path.join(step2_dir, region_filename)
+            cv2.imwrite(region_path, tear_region)
+            
+            # 使用FeatureExtractor检测斑块
+            spot_result = self.feature_extractor.detect_all_white_spots(tear_region)
+            
+            # 保存斑块检测结果图
+            if 'spot_image' in spot_result:
+                patch_filename = f"tear_patches_frame_{frame_num:06d}.png"
+                patch_path = os.path.join(step2_dir, patch_filename)
+                cv2.imwrite(patch_path, spot_result['spot_image'])
+            
+            # 分析撕裂面密度
+            analysis_result = self.analyze_tear_density(image_path, tear_mask)
+            if analysis_result:
+                self.results.append(analysis_result)
         
         print(f"第二步完成，撕裂面区域和斑块图已保存到: {step2_dir}")
         
@@ -405,7 +465,8 @@ class TearDensityAnalyzer:
         # 斑块面积分布
         patch_areas_all = []
         for r in sorted_results:
-            patch_areas_all.extend(r['patch_areas'])
+            if 'patch_areas' in r:
+                patch_areas_all.extend(r['patch_areas'])
         
         if patch_areas_all:
             ax2.hist(patch_areas_all, bins=20, alpha=0.7, color='green', edgecolor='black')
@@ -425,16 +486,23 @@ class TearDensityAnalyzer:
 
 def main():
     """主函数"""
+    import sys
     
     # 设置路径
     roi_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs"
-    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_replot_tear_density_curve"
+    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_tear_density_curve"
     
+    if len(sys.argv) > 1:
+        roi_dir = sys.argv[1]
+    
+    if len(sys.argv) > 2:
+        output_dir = sys.argv[2]
+
     # 创建分析器
     analyzer = TearDensityAnalyzer()
     
-    # 处理图像
-    analyzer.process_images(roi_dir, output_dir)
+    # 处理图像（默认使用新方法）
+    analyzer.process_images(roi_dir, output_dir, use_contour_method=True)
 
 if __name__ == "__main__":
     main()

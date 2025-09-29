@@ -12,6 +12,7 @@ import sys
 import platform
 from scipy import signal
 from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import grey_closing
 
 # 添加data_process目录到路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'data_process'))
@@ -211,7 +212,56 @@ class AdagausDensityAnalyzer:
         # 2.5 混合计数
         mixed_count = max(grad_count, rising_edges)
 
-        # 2.6 黑色像素总数（Final Mask 内）
+        # 2.6 计算“等高线平均占比”指标
+        # 以收缩后的左右边界内，逐行搜索水平最大梯度位置得到等高线，再进行沿Y的插值、closing“填坑”、高斯平滑
+        contraction_ratio = 0.10
+        contracted_left = left_sm + np.round((right_sm - left_sm) * contraction_ratio).astype(int)
+        contracted_right = right_sm - np.round((right_sm - left_sm) * contraction_ratio).astype(int)
+        contracted_left = np.clip(contracted_left, 0, w - 1)
+        contracted_right = np.clip(contracted_right, 0, w - 1)
+
+        # 梯度（从右到左白->黑取负号）
+        sobel_x = cv2.Sobel(filtered_adagaus, cv2.CV_32F, 1, 0, ksize=3)
+        gradient_map = -sobel_x
+
+        contour_x = np.full(h, -1, dtype=float)
+        for y in range(h):
+            lb = int(contracted_left[y])
+            rb = int(contracted_right[y])
+            if lb >= 0 and rb < w and rb > lb:
+                row = np.abs(gradient_map[y, lb:rb + 1])
+                if row.size > 0:
+                    x_rel = int(np.argmax(row))
+                    contour_x[y] = lb + x_rel
+
+        # 插值缺失行
+        yy = np.arange(h)
+        valid = contour_x >= 0
+        if np.any(valid):
+            x_interp = np.interp(yy, yy[valid], contour_x[valid])
+            # 不超过右边界
+            x_interp = np.minimum(x_interp, right_sm.astype(float))
+            # 形态学closing沿Y“填平向左凹陷”
+            closing_size = 11
+            if closing_size % 2 == 0:
+                closing_size += 1
+            x_closed = grey_closing(x_interp, size=closing_size, mode='nearest')
+            # 高斯平滑
+            x_smooth = gaussian_filter1d(x_closed, sigma=2.0, mode='nearest')
+            x_smooth = np.minimum(x_smooth, right_sm.astype(float))
+            x_smooth = np.clip(x_smooth, 0, w - 1)
+
+            # 逐行占比
+            width_lr = (right_sm - left_sm).astype(float)
+            safe_width = np.where(width_lr == 0, 1.0, width_lr)
+            ratios = (x_smooth - left_sm) / safe_width
+            ratios = np.clip(ratios, 0.0, 1.0)
+            valid_rows = width_lr > 0
+            avg_contour_ratio = float(np.mean(ratios[valid_rows])) if np.any(valid_rows) else 0.0
+        else:
+            avg_contour_ratio = 0.0
+
+        # 2.7 黑色像素总数（Final Mask 内）
         black_pixel_count = int(np.sum(((final_mask > 0) & (filtered_adagaus == 0)).astype(np.uint8)))
         # 单条黑色条状物平均像素数 D_b = N_pix / N_strips
         black_pixel_per_strip = (black_pixel_count / mixed_count) if mixed_count > 0 else 0.0
@@ -231,6 +281,7 @@ class AdagausDensityAnalyzer:
             'black_count_density': black_count_density,
             'black_pixel_count': black_pixel_count,
             'black_pixel_per_strip': black_pixel_per_strip,
+            'avg_contour_ratio': avg_contour_ratio,
             'image_shape': image.shape,
             'image_path': image_path
         }
@@ -275,7 +326,7 @@ class AdagausDensityAnalyzer:
         except (IndexError, ValueError):
             return -1
     
-    def process_images(self, roi_dir, output_dir):
+    def process_images(self, roi_dir, output_dir, use_contour_method=True):
         """按步骤处理所有ROI，生成并统计 Filtered Adaptive Gaussian。"""
         print("开始分析 Filtered Adaptive Gaussian 二值图密度...")
         print("=" * 60)
@@ -293,12 +344,37 @@ class AdagausDensityAnalyzer:
         
         print(f"找到 {len(image_files)} 个ROI图像文件")
         
+        # 如果需要使用撕裂面mask，则导入检测器
+        if use_contour_method:
+            import sys
+            sys.path.append('/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_shear_split')
+            from shear_tear_detector import ShearTearDetector
+            detector = ShearTearDetector(use_contour_method=True)
+        
         for image_path in tqdm(image_files, desc="计算与统计 Adagaus", unit="图像"):
             gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if gray is None:
                 continue
                 
-            final_mask = self.extractor._compute_final_filled_mask(gray)
+            # 根据方法选择不同的mask生成方式
+            if use_contour_method:
+                # 新方法：使用等高线方法生成撕裂面mask
+                result = detector.detect_surfaces(gray, visualize=False)
+                if result and 'intermediate_results' in result:
+                    tear_mask = result['intermediate_results'].get('tear_mask', None)
+                    if tear_mask is not None:
+                        # 使用等高线方法生成的撕裂面mask
+                        final_mask = tear_mask.astype(np.uint8) * 255
+                    else:
+                        # 回退到原始方法
+                        final_mask = self.extractor._compute_final_filled_mask(gray)
+                else:
+                    # 回退到原始方法
+                    final_mask = self.extractor._compute_final_filled_mask(gray)
+            else:
+                # 老方法：使用原始方法
+                final_mask = self.extractor._compute_final_filled_mask(gray)
+            
             adagaus = self.extractor._adaptive_gaussian_binary(gray)
             filtered = adagaus.copy()
             filtered[final_mask == 0] = 0
@@ -441,8 +517,11 @@ class AdagausDensityAnalyzer:
             sorted_results, smoothing_method='gaussian', window_size=50, sigma=10.0)
         smoothed_db = gaussian_filter1d(black_pixel_per_strip, sigma=10.0)
         
-        # 创建图表（两行）：上-D_b，新密度；下-黑条数量
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
+        # 取等高线平均占比
+        avg_ratios = np.array([r.get('avg_contour_ratio', 0.0) for r in sorted_results])
+
+        # 创建图表（三行）：上-D_b；中-黑条数量；下-等高线平均占比
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 14))
         
         # 新密度 D_b（每条黑条平均像素数）随时间（原始+平滑）
         ax1.plot(time_seconds, black_pixel_per_strip, 'b-', linewidth=0.8, alpha=0.3, label='Raw Data')
@@ -475,6 +554,20 @@ class AdagausDensityAnalyzer:
         ax2.axhline(y=mean_black, color='blue', linestyle='--', alpha=0.7,
                    label=f'Mean: {mean_black:.1f}')
         ax2.legend()
+
+        # 第三行：等高线平均占比曲线
+        ax3.plot(time_seconds, avg_ratios, 'g-', linewidth=2.0, alpha=0.9, label='Avg Contour Ratio')
+        ax3.fill_between(time_seconds, avg_ratios, alpha=0.15, color='green')
+        ax3.set_xlabel('Time (seconds)')
+        ax3.set_ylabel('Avg Contour Ratio')
+        ax3.set_title('Average Contour Position Ratio Over Time')
+        ax3.grid(True, alpha=0.3)
+        ax3.set_xlim(0, max(time_seconds))
+        mean_ratio = np.mean(avg_ratios)
+        ax3.axhline(y=mean_ratio, color='purple', linestyle='--', alpha=0.7,
+                   label=f'Mean: {mean_ratio:.3f}')
+        ax3.set_ylim(0.0, 1.0)
+        ax3.legend()
 
         # 下：数量曲线保持不变
         
@@ -557,8 +650,8 @@ def main():
     # 创建分析器
     analyzer = AdagausDensityAnalyzer()
     
-    # 处理图像
-    analyzer.process_images(roi_dir, output_dir)
+    # 处理图像（默认使用新方法）
+    analyzer.process_images(roi_dir, output_dir, use_contour_method=True)
 
 if __name__ == "__main__":
     main()

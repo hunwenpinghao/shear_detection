@@ -53,10 +53,16 @@ except AttributeError:
         pass
 
 class ShearTearDetector:
-    def __init__(self):
-        """初始化检测器"""
+    def __init__(self, use_contour_method=True):
+        """
+        初始化检测器
+        
+        Args:
+            use_contour_method: 是否使用基于等高线的新方法，默认为True
+        """
         self.shear_features = []
         self.tear_features = []
+        self.use_contour_method = use_contour_method
         
     def preprocess_image(self, image):
         """图像预处理"""
@@ -287,6 +293,132 @@ class ShearTearDetector:
             'orientation_consistency': orientation_consistency,
             'fiber_strength': np.mean(lambda1 - lambda2)
         }
+    
+    def detect_contour_based_surfaces(self, image):
+        """
+        基于等高线的撕裂面与切割面检测方法
+        
+        Args:
+            image: 输入图像
+            
+        Returns:
+            tuple: (segmented_image, labels, tear_mask, shear_mask, contour_line, left_edges, right_edges)
+        """
+        # 导入等高线提取相关模块
+        from scipy.ndimage import gaussian_filter1d, grey_closing
+        from scipy.interpolate import interp1d
+        
+        # 预处理图像
+        processed = self.preprocess_image(image)
+        h, w = image.shape
+        
+        # 1. 计算Otsu二值化
+        _, otsu_binary = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # 2. 计算左右边缘（不收缩的原始边缘）
+        left_edges = np.full(h, w, dtype=int)
+        right_edges = np.full(h, -1, dtype=int)
+        
+        for y in range(h):
+            cols = np.where(otsu_binary[y] > 0)[0]
+            if cols.size:
+                left_edges[y] = cols.min()
+                right_edges[y] = cols.max()
+        
+        # 3. 平滑左右边缘
+        edge_sigma = 5.0
+        yy = np.arange(h)
+        valid = (left_edges < w) & (right_edges >= 0) & (right_edges > left_edges)
+        
+        if np.any(valid):
+            left_interp = np.interp(yy, yy[valid], left_edges[valid].astype(float))
+            right_interp = np.interp(yy, yy[valid], right_edges[valid].astype(float))
+            left_sm = gaussian_filter1d(left_interp, sigma=edge_sigma, mode='nearest')
+            right_sm = gaussian_filter1d(right_interp, sigma=edge_sigma, mode='nearest')
+            left_sm = np.clip(np.rint(left_sm), 0, w - 1).astype(int)
+            right_sm = np.clip(np.rint(right_sm), 0, w - 1).astype(int)
+        else:
+            left_sm, right_sm = left_edges, right_edges
+        
+        # 4. 计算收缩后的边界用于等高线检测
+        contraction_ratio = 0.1
+        contracted_left = left_sm + np.round((right_sm - left_sm) * contraction_ratio).astype(int)
+        contracted_right = right_sm - np.round((right_sm - left_sm) * contraction_ratio).astype(int)
+        contracted_left = np.clip(contracted_left, 0, w - 1)
+        contracted_right = np.clip(contracted_right, 0, w - 1)
+        
+        # 5. 计算梯度（从右到左白->黑取负号）
+        sobel_x = cv2.Sobel(processed, cv2.CV_32F, 1, 0, ksize=3)
+        gradient_map = -sobel_x
+        
+        # 6. 在收缩区域内搜索最大梯度位置得到等高线
+        contour_x = np.full(h, -1, dtype=float)
+        contour_y = []
+        
+        for y in range(h):
+            lb = int(contracted_left[y])
+            rb = int(contracted_right[y])
+            if lb >= 0 and rb < w and rb > lb:
+                row = np.abs(gradient_map[y, lb:rb + 1])
+                if row.size > 0:
+                    x_rel = int(np.argmax(row))
+                    contour_x[y] = lb + x_rel
+                    contour_y.append(y)
+        
+        contour_y = np.array(contour_y)
+        
+        # 7. 插值和平滑等高线
+        if len(contour_x) > 1 and len(contour_y) > 0:
+            y_full = np.arange(h)
+            f_x = interp1d(contour_y, contour_x[contour_y], kind='linear', bounds_error=False, fill_value='extrapolate')
+            x_interp = f_x(y_full).astype(float)
+            
+            # 不超过右边界
+            x_interp = np.minimum(x_interp, right_sm.astype(float))
+            
+            # 形态学闭运算填坑
+            closing_size = 11
+            if closing_size % 2 == 0:
+                closing_size += 1
+            x_closed = grey_closing(x_interp, size=closing_size, mode='nearest')
+            
+            # 高斯平滑
+            x_smooth = gaussian_filter1d(x_closed, sigma=2.0, mode='nearest')
+            x_smooth = np.minimum(x_smooth, right_sm.astype(float))
+            x_smooth = np.clip(x_smooth, 0, w - 1)
+        else:
+            # 如果没有找到等高线，使用中间位置
+            x_smooth = (left_sm + right_sm) / 2.0
+        
+        # 8. 基于等高线分割撕裂面和剪切面
+        tear_mask = np.zeros_like(image, dtype=bool)
+        shear_mask = np.zeros_like(image, dtype=bool)
+        
+        for y in range(h):
+            if left_sm[y] < w and right_sm[y] >= 0 and right_sm[y] > left_sm[y]:
+                # 撕裂面：从左边缘到等高线
+                tear_start = left_sm[y]
+                tear_end = int(np.round(x_smooth[y]))
+                if tear_end > tear_start:
+                    tear_mask[y, tear_start:tear_end] = True
+                
+                # 剪切面：从等高线到右边缘
+                shear_start = int(np.round(x_smooth[y]))
+                shear_end = right_sm[y]
+                if shear_end > shear_start:
+                    shear_mask[y, shear_start:shear_end] = True
+        
+        # 9. 创建分割结果图像
+        segmented_image = np.zeros_like(image, dtype=np.uint8)
+        segmented_image[tear_mask] = 128  # 灰色表示撕裂面
+        segmented_image[shear_mask] = 255  # 白色表示剪切面
+        
+        # 10. 创建标签图
+        labels = np.zeros_like(image, dtype=np.int32)
+        labels[tear_mask] = 1
+        labels[shear_mask] = 2
+        
+        return segmented_image, labels, tear_mask, shear_mask, x_smooth, left_sm, right_sm
     
     def extract_all_features(self, image):
         """提取所有特征"""
@@ -544,6 +676,79 @@ class ShearTearDetector:
     
     def detect_surfaces(self, image, visualize=True):
         """检测撕裂面和剪切面"""
+        if self.use_contour_method:
+            # 使用新的基于等高线的方法
+            return self.detect_surfaces_contour_method(image, visualize)
+        else:
+            # 使用原有的方法
+            return self.detect_surfaces_original_method(image, visualize)
+    
+    def detect_surfaces_contour_method(self, image, visualize=True, save_path=None):
+        """基于等高线的撕裂面和剪切面检测"""
+        # 使用等高线方法进行分割
+        segmented_image, labels, tear_mask, shear_mask, contour_line, left_edges, right_edges = self.detect_contour_based_surfaces(image)
+        
+        # 计算等高线平均占比作为特征
+        width_lr = (right_edges - left_edges).astype(float)
+        safe_width = np.where(width_lr == 0, 1.0, width_lr)
+        ratios = (contour_line - left_edges) / safe_width
+        ratios = np.clip(ratios, 0.0, 1.0)
+        valid_rows = width_lr > 0
+        avg_contour_ratio = float(np.mean(ratios[valid_rows])) if np.any(valid_rows) else 0.5
+        
+        # 基于等高线占比进行简单分类
+        if avg_contour_ratio < 0.4:
+            surface_type = 'tear'
+            confidence = 1.0 - avg_contour_ratio
+        else:
+            surface_type = 'shear'
+            confidence = avg_contour_ratio
+        
+        # 创建简化的特征字典
+        features = {
+            'contour_ratio': avg_contour_ratio,
+            'tear_area_ratio': np.sum(tear_mask) / (np.sum(tear_mask) + np.sum(shear_mask) + 1e-7),
+            'shear_area_ratio': np.sum(shear_mask) / (np.sum(tear_mask) + np.sum(shear_mask) + 1e-7)
+        }
+        
+        # 创建中间结果
+        intermediate_results = {
+            'processed_image': self.preprocess_image(image),
+            'contour_line': contour_line,
+            'left_edges': left_edges,
+            'right_edges': right_edges,
+            'tear_mask': tear_mask,
+            'shear_mask': shear_mask
+        }
+        
+        result = {
+            'surface_type': surface_type,
+            'confidence': confidence,
+            'features': features,
+            'intermediate_results': intermediate_results,
+            'segmented_image': segmented_image,
+            'labels': labels,
+            'contour_line': contour_line,
+            'left_edges': left_edges,
+            'right_edges': right_edges
+        }
+        
+        if visualize:
+            # 使用等高线方法的可视化
+            self.visualize_contour_results(image, features, surface_type, confidence, intermediate_results, segmented_image)
+            
+            # 创建对比可视化图像用于保存
+            comparison_visualization = self.create_contour_comparison_visualization(image, intermediate_results, surface_type, confidence)
+            result['visualization'] = comparison_visualization
+            
+            # 保存可视化结果
+            if save_path:
+                self.save_visualization_results(result, save_path)
+        
+        return result
+    
+    def detect_surfaces_original_method(self, image, visualize=True):
+        """原有的撕裂面和剪切面检测方法"""
         # 提取特征
         features, intermediate_results = self.extract_all_features(image)
         
@@ -689,6 +894,209 @@ class ShearTearDetector:
         plt.close(fig)
         return img_bgr
     
+    def save_visualization_results(self, result, save_path):
+        """保存可视化结果到文件"""
+        import os
+        
+        # 创建输出目录
+        os.makedirs(save_path, exist_ok=True)
+        
+        # 获取基本信息
+        surface_type = result['surface_type']
+        confidence = result['confidence']
+        features = result['features']
+        
+        # 保存分割结果图像
+        segmented_image = result['segmented_image']
+        segmented_path = os.path.join(save_path, f'segmented_{surface_type}_{confidence:.3f}.png')
+        cv2.imwrite(segmented_path, segmented_image)
+        print(f"分割结果已保存到: {segmented_path}")
+        
+        # 保存对比可视化图像
+        if 'visualization' in result:
+            vis_path = os.path.join(save_path, f'visualization_{surface_type}_{confidence:.3f}.png')
+            cv2.imwrite(vis_path, result['visualization'])
+            print(f"可视化结果已保存到: {vis_path}")
+        
+        # 保存特征信息到文本文件
+        features_path = os.path.join(save_path, f'features_{surface_type}_{confidence:.3f}.txt')
+        with open(features_path, 'w', encoding='utf-8') as f:
+            f.write(f"表面类型检测结果\n")
+            f.write(f"=" * 30 + "\n")
+            f.write(f"检测结果: {surface_type}\n")
+            f.write(f"置信度: {confidence:.3f}\n")
+            f.write(f"\n特征信息:\n")
+            for key, value in features.items():
+                f.write(f"  {key}: {value:.3f}\n")
+        print(f"特征信息已保存到: {features_path}")
+        
+        # 保存等高线数据
+        if 'contour_line' in result:
+            contour_data = {
+                'contour_line': result['contour_line'].tolist(),
+                'left_edges': result['left_edges'].tolist(),
+                'right_edges': result['right_edges'].tolist(),
+                'surface_type': surface_type,
+                'confidence': confidence,
+                'features': features
+            }
+            
+            import json
+            contour_path = os.path.join(save_path, f'contour_data_{surface_type}_{confidence:.3f}.json')
+            with open(contour_path, 'w', encoding='utf-8') as f:
+                json.dump(contour_data, f, indent=2, ensure_ascii=False)
+            print(f"等高线数据已保存到: {contour_path}")
+    
+    def visualize_contour_results(self, original_image, features, surface_type, confidence, intermediate_results, segmented_image):
+        """等高线方法的结果可视化"""
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig.suptitle(f'Contour-based Surface Detection: {surface_type.upper()} (Confidence: {confidence:.3f})', fontsize=16)
+        
+        # 原始图像
+        axes[0, 0].imshow(original_image, cmap='gray')
+        axes[0, 0].set_title('Original Image')
+        axes[0, 0].axis('off')
+        
+        # 预处理后图像
+        axes[0, 1].imshow(intermediate_results['processed_image'], cmap='gray')
+        axes[0, 1].set_title('Preprocessed Image')
+        axes[0, 1].axis('off')
+        
+        # 边缘线和等高线
+        axes[0, 2].imshow(original_image, cmap='gray')
+        y_coords = np.arange(len(intermediate_results['left_edges']))
+        axes[0, 2].plot(intermediate_results['left_edges'], y_coords, 'g-', linewidth=2, label='Left Edge')
+        axes[0, 2].plot(intermediate_results['right_edges'], y_coords, 'b-', linewidth=2, label='Right Edge')
+        axes[0, 2].plot(intermediate_results['contour_line'], y_coords, 'r-', linewidth=2, label='Contour Line')
+        axes[0, 2].set_title('Edges and Contour Line')
+        axes[0, 2].legend()
+        axes[0, 2].axis('off')
+        
+        # 分割结果叠加可视化
+        original_rgb = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
+        combined_overlay = original_rgb.copy()
+        combined_overlay[intermediate_results['tear_mask']] = [255, 0, 0]  # 撕裂面：红色
+        combined_overlay[intermediate_results['shear_mask']] = [0, 0, 255]  # 剪切面：蓝色
+        
+        axes[1, 0].imshow(original_rgb)
+        axes[1, 0].imshow(combined_overlay, alpha=0.5)
+        axes[1, 0].set_title('Surface Segmentation Overlay\n(Red: Tear, Blue: Shear)')
+        axes[1, 0].axis('off')
+        
+        # 等高线占比特征
+        self.plot_contour_features(axes[1, 1], features)
+        
+        # 区域面积统计
+        self.plot_area_statistics(axes[1, 2], features)
+        
+        plt.tight_layout()
+    
+    def plot_contour_features(self, ax, features):
+        """绘制等高线特征"""
+        # 等高线占比
+        contour_ratio = features.get('contour_ratio', 0.5)
+        
+        # 创建特征条形图
+        feature_names = ['Contour Ratio', 'Tear Area Ratio', 'Shear Area Ratio']
+        feature_values = [
+            features.get('contour_ratio', 0.5),
+            features.get('tear_area_ratio', 0.0),
+            features.get('shear_area_ratio', 0.0)
+        ]
+        
+        bars = ax.bar(feature_names, feature_values, color=['orange', 'red', 'blue'])
+        ax.set_ylabel('Ratio')
+        ax.set_title('Contour-based Features')
+        ax.set_ylim(0, 1)
+        
+        # 添加数值标签
+        for bar, value in zip(bars, feature_values):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                   f'{value:.3f}', ha='center', va='bottom')
+    
+    def plot_area_statistics(self, ax, features):
+        """绘制区域面积统计"""
+        tear_ratio = features.get('tear_area_ratio', 0.0)
+        shear_ratio = features.get('shear_area_ratio', 0.0)
+        
+        # 饼图显示区域占比
+        sizes = [tear_ratio, shear_ratio]
+        labels = ['Tear Surface', 'Shear Surface']
+        colors = ['red', 'blue']
+        
+        if sum(sizes) > 0:
+            ax.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+        else:
+            ax.text(0.5, 0.5, 'No valid regions', ha='center', va='center', transform=ax.transAxes)
+        
+        ax.set_title('Surface Area Distribution')
+    
+    def create_contour_comparison_visualization(self, original_image, intermediate_results, surface_type, confidence):
+        """创建等高线方法的对比可视化"""
+        # 创建RGB图像
+        original_rgb = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
+        
+        # 获取等高线和边缘信息
+        contour_line = intermediate_results.get('contour_line', np.zeros(original_image.shape[0]))
+        left_edges = intermediate_results.get('left_edges', np.zeros(original_image.shape[0]))
+        right_edges = intermediate_results.get('right_edges', np.zeros(original_image.shape[0]))
+        tear_mask = intermediate_results.get('tear_mask', np.zeros_like(original_image, dtype=bool))
+        shear_mask = intermediate_results.get('shear_mask', np.zeros_like(original_image, dtype=bool))
+        
+        # 创建对比图
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle(f'Contour-based Segmentation - {surface_type.upper()} (Confidence: {confidence:.3f})', fontsize=16)
+        
+        # 原始图像
+        axes[0, 0].imshow(original_rgb)
+        axes[0, 0].set_title('Original Image')
+        axes[0, 0].axis('off')
+        
+        # 边缘线和等高线
+        axes[0, 1].imshow(original_rgb)
+        y_coords = np.arange(len(left_edges))
+        axes[0, 1].plot(left_edges, y_coords, 'g-', linewidth=2, label='Left Edge')
+        axes[0, 1].plot(right_edges, y_coords, 'b-', linewidth=2, label='Right Edge')
+        axes[0, 1].plot(contour_line, y_coords, 'r-', linewidth=2, label='Contour Line')
+        axes[0, 1].set_title('Edges and Contour Line')
+        axes[0, 1].legend()
+        axes[0, 1].axis('off')
+        
+        # 撕裂面
+        tear_overlay = original_rgb.copy()
+        tear_overlay[tear_mask] = [255, 0, 0]  # 红色
+        axes[1, 0].imshow(original_rgb)
+        axes[1, 0].imshow(tear_overlay, alpha=0.5)
+        axes[1, 0].set_title('Tear Surface (Red)')
+        axes[1, 0].axis('off')
+        
+        # 剪切面
+        shear_overlay = original_rgb.copy()
+        shear_overlay[shear_mask] = [0, 0, 255]  # 蓝色
+        axes[1, 1].imshow(original_rgb)
+        axes[1, 1].imshow(shear_overlay, alpha=0.5)
+        axes[1, 1].set_title('Shear Surface (Blue)')
+        axes[1, 1].axis('off')
+        
+        plt.tight_layout()
+        
+        # 转换为OpenCV格式用于保存
+        fig.canvas.draw()
+        
+        # 获取图像数据
+        buf = fig.canvas.buffer_rgba()
+        img_array = np.asarray(buf)
+        
+        # 转换为RGB格式
+        img_rgb = img_array[:, :, :3]  # 去掉alpha通道
+        
+        # 转换为BGR格式
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        
+        plt.close(fig)
+        return img_bgr
+    
     def visualize_results(self, original_image, features, surface_type, confidence, intermediate_results, segmented_image=None, otsu_mask=None, inner_mask=None):
         """可视化检测结果"""
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -797,16 +1205,53 @@ class ShearTearDetector:
 
 def main():
     """主函数 - 测试检测器"""
-    detector = ShearTearDetector()
+    import sys
+    import os
     
-    # 测试图像路径
-    test_images = [
-        "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_Video_20250821140339629/roi_imgs/frame_006523_roi.png",
-        "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_Video_20250821140339629/roi_imgs/frame_000044_roi.png",
-        "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_Video_20250821140339629/roi_imgs/frame_000066_roi.png"
-    ]
+    # 检查命令行参数
+    use_contour_method = True
+    save_results = False
+    output_dir = "detection_results"
     
-    for img_path in test_images:
+    if len(sys.argv) > 1:
+        if sys.argv[1] == '--original':
+            use_contour_method = False
+            print("使用原始检测方法")
+        elif sys.argv[1] == '--contour':
+            use_contour_method = True
+            print("使用等高线检测方法")
+        elif sys.argv[1] == '--save':
+            save_results = True
+            if len(sys.argv) > 2:
+                output_dir = sys.argv[2]
+            print(f"使用等高线检测方法，结果将保存到: {output_dir}")
+        else:
+            print("使用方法: python shear_tear_detector.py [--original|--contour|--save [output_dir]]")
+            print("默认使用等高线方法")
+    
+    # 创建检测器
+    detector = ShearTearDetector(use_contour_method=use_contour_method)
+    
+    # 测试图像路径 - 使用data_shear_split/roi_images/目录下的所有图像
+    roi_images_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_shear_split/roi_images"
+    test_images = []
+    
+    # 获取roi_images目录下的所有图像文件
+    if os.path.exists(roi_images_dir):
+        for filename in os.listdir(roi_images_dir):
+            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                test_images.append(os.path.join(roi_images_dir, filename))
+        
+        # 按文件名排序
+        test_images.sort()
+        print(f"找到 {len(test_images)} 个测试图像:")
+        for img in test_images:
+            print(f"  - {os.path.basename(img)}")
+    else:
+        print(f"警告: 目录 {roi_images_dir} 不存在")
+        test_images = []
+    
+    for i, img_path in enumerate(test_images):
         try:
             # 读取图像
             image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
@@ -818,7 +1263,13 @@ def main():
             print("=" * 50)
             
             # 检测表面类型
-            result = detector.detect_surfaces(image, visualize=True)
+            if save_results and use_contour_method:
+                # 为每个图像创建独立的保存目录
+                img_name = os.path.splitext(os.path.basename(img_path))[0]
+                img_save_dir = os.path.join(output_dir, img_name)
+                result = detector.detect_surfaces_contour_method(image, visualize=True, save_path=img_save_dir)
+            else:
+                result = detector.detect_surfaces(image, visualize=True)
             
             print(f"检测结果: {result['surface_type']}")
             print(f"置信度: {result['confidence']:.3f}")

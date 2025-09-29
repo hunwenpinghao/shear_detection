@@ -22,7 +22,45 @@ import cv2
 import numpy as np
 import argparse
 from scipy.ndimage import gaussian_filter1d
+from scipy.interpolate import interp1d
+import matplotlib.pyplot as plt
+from scipy.ndimage import grey_closing
 
+
+def setup_chinese_font():
+    """设置中英文通用字体，尽量避免方框/缺字。
+    优先顺序：Arial Unicode MS / Noto Sans CJK SC / PingFang / Microsoft YaHei / SimHei / WenQuanYi / DejaVu Sans。
+    同时设置 font.family 与三大类字体回退。
+    """
+    try:
+        from matplotlib import font_manager as fm
+        available = {f.name for f in fm.fontManager.ttflist}
+        preferred = [
+            'Arial Unicode MS',
+            'Noto Sans CJK SC',
+            'PingFang SC',
+            'Hiragino Sans GB',
+            'STHeiti',
+            'Microsoft YaHei',
+            'SimHei',
+            'WenQuanYi Micro Hei',
+            'DejaVu Sans',
+        ]
+        chosen = [f for f in preferred if f in available]
+        if not chosen:
+            chosen = ['DejaVu Sans']
+
+        # 设置家族与回退
+        plt.rcParams['font.family'] = 'sans-serif'
+        plt.rcParams['font.sans-serif'] = chosen + ['DejaVu Sans']
+        plt.rcParams['font.serif'] = chosen + ['DejaVu Serif']
+        plt.rcParams['font.monospace'] = ['Menlo', 'Consolas', 'Courier New', 'DejaVu Sans Mono']
+        plt.rcParams['axes.unicode_minus'] = False
+    except Exception:
+        # 最小兜底
+        plt.rcParams['font.family'] = 'sans-serif'
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
 
 def ensure_binary(gray: np.ndarray) -> np.ndarray:
     """确保输入为 0/255 二值图。"""
@@ -277,6 +315,257 @@ def count_by_vertical_scanline(binary_img: np.ndarray, frac: float = 0.25, smoot
         return est, scan_x, col_curve
 
 
+def detect_gradient_contour_from_right_edge(
+    binary_img: np.ndarray, 
+    gradient_threshold: float = 0.3,
+    search_width: int = 50,
+    edge_sigma: float = 5.0,
+    contraction_ratio: float = 0.1
+) -> tuple:
+    """
+    检测final mask右边缘线往左第一条梯度等高线
+    
+    参数:
+        binary_img: 二值图像 (0/255)
+        gradient_threshold: 梯度阈值 (0-1)
+        search_width: 从右边缘向左搜索的宽度
+        edge_sigma: 边缘平滑的sigma值
+        contraction_ratio: 边缘收缩比例 (0-1)
+    
+    返回:
+        (contour_x, contour_y, right_edges, gradient_map)
+        - contour_x: 等高线的x坐标数组
+        - contour_y: 等高线的y坐标数组  
+        - right_edges: 右边缘线坐标
+        - gradient_map: 梯度图
+    """
+    h, w = binary_img.shape
+    
+    # 1. 计算Final Mask的左右边缘线
+    _, otsu_binary = cv2.threshold(binary_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    left_edges = np.full(h, w, dtype=int)
+    right_edges = np.full(h, -1, dtype=int)
+    
+    for y in range(h):
+        xs = np.where(otsu_binary[y] == 255)[0]
+        if xs.size:
+            left_edges[y] = xs.min()
+            right_edges[y] = xs.max()
+    
+    # 2. 对左右边缘线进行平滑处理
+    yy = np.arange(h)
+    left_valid = left_edges < w
+    right_valid = right_edges >= 0
+    
+    if np.any(left_valid):
+        left_interp = np.interp(yy, yy[left_valid], left_edges[left_valid].astype(float))
+        left_sm = gaussian_filter1d(left_interp, sigma=edge_sigma, mode='nearest')
+        left_sm = np.clip(np.rint(left_sm), 0, w - 1).astype(int)
+    else:
+        left_sm = left_edges
+        
+    if np.any(right_valid):
+        right_interp = np.interp(yy, yy[right_valid], right_edges[right_valid].astype(float))
+        right_sm = gaussian_filter1d(right_interp, sigma=edge_sigma, mode='nearest')
+        right_sm = np.clip(np.rint(right_sm), 0, w - 1).astype(int)
+    else:
+        right_sm = right_edges
+    
+    # 3. 计算收缩后的搜索区域
+    # 左边缘向右收缩，右边缘向左收缩
+    contracted_left = left_sm + np.round((right_sm - left_sm) * contraction_ratio).astype(int)
+    contracted_right = right_sm - np.round((right_sm - left_sm) * contraction_ratio).astype(int)
+    
+    # 确保收缩后的区域有效
+    contracted_left = np.clip(contracted_left, 0, w - 1)
+    contracted_right = np.clip(contracted_right, 0, w - 1)
+    
+    # 4. 计算梯度图 (从右向左的梯度)
+    # 使用Sobel算子计算水平梯度 (从右向左)
+    sobel_x = cv2.Sobel(binary_img, cv2.CV_32F, 1, 0, ksize=3)
+    # 取负值，因为我们要检测从白到黑的变化
+    gradient_map = -sobel_x
+    
+    # 5. 在收缩后的区域内搜索梯度等高线
+    contour_x = []
+    contour_y = []
+    
+    for y in range(h):
+        left_bound = contracted_left[y]
+        right_bound = contracted_right[y]
+        
+        if left_bound >= right_bound or right_bound < 0 or left_bound >= w:
+            continue
+            
+        # 在收缩后的区域内搜索梯度变化点
+        max_gradient = 0
+        best_x = right_bound
+        
+        for x in range(left_bound, right_bound + 1):
+            if x >= 0 and x < w:
+                grad_val = abs(gradient_map[y, x])
+                if grad_val > max_gradient:
+                    max_gradient = grad_val
+                    best_x = x
+        
+        # 检查是否超过阈值
+        if max_gradient > gradient_threshold * np.max(gradient_map):
+            contour_x.append(best_x)
+            contour_y.append(y)
+    
+    return np.array(contour_x), np.array(contour_y), right_sm, gradient_map
+
+
+def interpolate_and_smooth_contour(
+    contour_x: np.ndarray,
+    contour_y: np.ndarray,
+    image_height: int,
+    image_width: int,
+    right_edges: np.ndarray | None = None,
+    closing_size: int = 11,
+    smoothing_sigma: float = 3.0,
+) -> tuple:
+    """
+    对等高线进行上下方向插值和平滑滤波
+    
+    参数:
+        contour_x, contour_y: 原始等高线坐标
+        image_height: 图像高度
+        smoothing_sigma: 平滑滤波的sigma值
+    
+    返回:
+        (smooth_x, smooth_y): 平滑后的等高线坐标
+    """
+    if len(contour_x) == 0 or len(contour_y) == 0:
+        return np.array([]), np.array([])
+    
+    # 创建完整的y坐标范围
+    y_full = np.arange(image_height)
+    
+    # 使用插值填补缺失的y坐标
+    if len(contour_x) > 1:
+        # 线性插值（以右边界为约束，后续做“填坑”处理）
+        f_x = interp1d(contour_y, contour_x, kind='linear', bounds_error=False, fill_value='extrapolate')
+        x_interp = f_x(y_full).astype(float)
+
+        # 若提供右边界，先剪裁到不超过右边界
+        if right_edges is not None and right_edges.shape[0] == image_height:
+            x_interp = np.minimum(x_interp, right_edges.astype(float))
+
+        # 先执行形态学 closing 沿 Y 方向“填平向左凹陷的坑”
+        # 注意：closing 的 size 取奇数效果更好
+        if closing_size < 1:
+            closing_size = 1
+        if closing_size % 2 == 0:
+            closing_size += 1
+        x_closed = grey_closing(x_interp, size=closing_size, mode='nearest')
+
+        # 再执行高斯平滑
+        x_smooth = gaussian_filter1d(x_closed, sigma=smoothing_sigma, mode='nearest') if smoothing_sigma > 0 else x_closed
+
+        # 最终再次约束到右边界以内
+        if right_edges is not None and right_edges.shape[0] == image_height:
+            x_smooth = np.minimum(x_smooth, right_edges.astype(float))
+
+        # 确保坐标在有效范围内（基于图像宽度）
+        x_smooth = np.clip(x_smooth, 0, image_width - 1)
+
+        return x_smooth, y_full
+    else:
+        # 如果只有一个点，返回原始坐标
+        return contour_x, contour_y
+
+
+def visualize_gradient_contour_detection(
+    binary_img: np.ndarray,
+    contour_x: np.ndarray,
+    contour_y: np.ndarray,
+    right_edges: np.ndarray,
+    gradient_map: np.ndarray,
+    smooth_x: np.ndarray,
+    smooth_y: np.ndarray,
+    save_path: str,
+    left_edges: np.ndarray = None,
+    contracted_left: np.ndarray = None,
+    contracted_right: np.ndarray = None
+):
+    """
+    可视化梯度等高线检测结果
+    """
+    h, w = binary_img.shape
+    
+    # 创建4个子图的布局
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # 子图1: 原始图像 + 边缘线 + 收缩区域 + 检测到的等高线
+    ax1.imshow(binary_img, cmap='gray')
+    
+    # 绘制原始边缘线
+    if left_edges is not None:
+        ax1.plot(left_edges, np.arange(h), 'c-', linewidth=1, alpha=0.6, label='左边缘线')
+    ax1.plot(right_edges, np.arange(h), 'g-', linewidth=2, alpha=0.8, label='右边缘线')
+    
+    # 绘制收缩后的搜索区域
+    if contracted_left is not None and contracted_right is not None:
+        ax1.plot(contracted_left, np.arange(h), 'm--', linewidth=1, alpha=0.7, label='收缩左边界')
+        ax1.plot(contracted_right, np.arange(h), 'm--', linewidth=1, alpha=0.7, label='收缩右边界')
+    
+    if len(contour_x) > 0:
+        ax1.plot(contour_x, contour_y, 'r.', markersize=3, alpha=0.8, label='检测到的等高线点')
+        ax1.plot(smooth_x, smooth_y, 'b-', linewidth=2, alpha=0.9, label='平滑后的等高线')
+    
+    ax1.set_title('梯度等高线检测结果（含收缩区域）')
+    # 将图例移至图外右侧，避免遮挡图像细节
+    ax1.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0., frameon=True)
+    ax1.axis('off')
+    
+    # 子图2: 梯度图
+    gradient_display = np.abs(gradient_map)
+    im2 = ax2.imshow(gradient_display, cmap='hot', alpha=0.8)
+    ax2.set_title('梯度图 (绝对值)')
+    ax2.axis('off')
+    plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+    
+    # 子图3: 等高线x坐标随y的变化
+    if len(contour_x) > 0:
+        ax3.plot(contour_y, contour_x, 'r.', markersize=4, alpha=0.6, label='原始检测点')
+        ax3.plot(smooth_y, smooth_x, 'b-', linewidth=2, alpha=0.9, label='平滑曲线')
+        ax3.set_xlabel('Y坐标')
+        ax3.set_ylabel('X坐标')
+        ax3.set_title('等高线X坐标变化')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        ax3.invert_yaxis()  # 图像坐标系y轴向下
+    else:
+        ax3.text(0.5, 0.5, '未检测到等高线', ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title('等高线X坐标变化')
+    
+    # 子图4: 右边缘线与等高线的对比
+    ax4.plot(np.arange(h), right_edges, 'g-', linewidth=2, alpha=0.8, label='右边缘线')
+    if len(smooth_x) > 0:
+        ax4.plot(smooth_y, smooth_x, 'b-', linewidth=2, alpha=0.9, label='平滑等高线')
+        # 计算距离
+        if len(smooth_x) == len(right_edges):
+            distance = right_edges - smooth_x
+            ax4_twin = ax4.twinx()
+            ax4_twin.plot(smooth_y, distance, 'r--', linewidth=1, alpha=0.7, label='距离')
+            ax4_twin.set_ylabel('右边缘到等高线的距离', color='r')
+    
+    ax4.set_xlabel('Y坐标')
+    ax4.set_ylabel('X坐标')
+    ax4.set_title('右边缘线与等高线对比')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    ax4.invert_yaxis()
+    
+    # 为右侧图例留出空间
+    plt.tight_layout(rect=[0, 0, 0.88, 1])
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"梯度等高线检测可视化已保存: {save_path}")
+
+
 def visualize_components(gray: np.ndarray, comp_mask: np.ndarray, save_path: str):
     """在原图/灰度背景上着色显示组件并保存。"""
     if len(gray.shape) == 2:
@@ -423,7 +712,16 @@ def main():
     parser.add_argument('--scan_no_grad', action='store_true', help='Use binary change counting instead of gradient peaks')
     parser.add_argument('--scan_hybrid', action='store_true', help='Use both gradient and binary change detection')
     parser.add_argument('--edge_sigma', type=float, default=5.0, help='Gaussian sigma for smoothing left/right edges along Y')
+    parser.add_argument('--gradient_contour', action='store_true', help='Enable gradient contour detection from right edge')
+    parser.add_argument('--gradient_threshold', type=float, default=0.3, help='Gradient threshold for contour detection (0-1)')
+    parser.add_argument('--search_width', type=int, default=50, help='Search width from right edge for contour detection')
+    parser.add_argument('--smoothing_sigma', type=float, default=3.0, help='Gaussian sigma for contour smoothing')
+    parser.add_argument('--closing_size', type=int, default=11, help='Morphological closing size (odd int) to fill left-indented pits')
+    parser.add_argument('--contraction_ratio', type=float, default=0.1, help='Edge contraction ratio for search region (0-1)')
     args = parser.parse_args()
+
+    # 设置中文字体（在任何绘图前调用）
+    setup_chinese_font()
 
     gray = cv2.imread(args.image, cv2.IMREAD_GRAYSCALE)
     if gray is None:
@@ -501,6 +799,94 @@ def main():
             edge_sigma=args.edge_sigma,
         )
         print(f"扫描线分析图已保存: {scan_out_path}")
+
+    # 梯度等高线检测功能
+    if args.gradient_contour:
+        print("\n开始梯度等高线检测...")
+        contour_x, contour_y, right_edges, gradient_map = detect_gradient_contour_from_right_edge(
+            binary,
+            gradient_threshold=args.gradient_threshold,
+            search_width=args.search_width,
+            edge_sigma=args.edge_sigma,
+            contraction_ratio=args.contraction_ratio
+        )
+        
+        print(f"检测到 {len(contour_x)} 个等高线点")
+        
+        # 对等高线进行插值和平滑
+        smooth_x, smooth_y = interpolate_and_smooth_contour(
+            contour_x,
+            contour_y,
+            image_height=binary.shape[0],
+            image_width=binary.shape[1],
+            right_edges=right_edges,
+            closing_size=getattr(args, 'closing_size', 11),
+            smoothing_sigma=args.smoothing_sigma,
+        )
+        
+        print(f"平滑后等高线长度: {len(smooth_x)}")
+        
+        # 重新计算收缩区域用于可视化
+        _, otsu_binary = cv2.threshold(binary, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        h, w = binary.shape
+        left_edges = np.full(h, w, dtype=int)
+        for y in range(h):
+            xs = np.where(otsu_binary[y] == 255)[0]
+            if xs.size:
+                left_edges[y] = xs.min()
+        
+        # 平滑左右边缘
+        yy = np.arange(h)
+        left_valid = left_edges < w
+        right_valid = right_edges >= 0
+        
+        if np.any(left_valid):
+            left_interp = np.interp(yy, yy[left_valid], left_edges[left_valid].astype(float))
+            left_sm = gaussian_filter1d(left_interp, sigma=args.edge_sigma, mode='nearest')
+            left_sm = np.clip(np.rint(left_sm), 0, w - 1).astype(int)
+        else:
+            left_sm = left_edges
+            
+        if np.any(right_valid):
+            right_interp = np.interp(yy, yy[right_valid], right_edges[right_valid].astype(float))
+            right_sm = gaussian_filter1d(right_interp, sigma=args.edge_sigma, mode='nearest')
+            right_sm = np.clip(np.rint(right_sm), 0, w - 1).astype(int)
+        else:
+            right_sm = right_edges
+        
+        # 计算收缩区域
+        contracted_left = left_sm + np.round((right_sm - left_sm) * args.contraction_ratio).astype(int)
+        contracted_right = right_sm - np.round((right_sm - left_sm) * args.contraction_ratio).astype(int)
+        contracted_left = np.clip(contracted_left, 0, w - 1)
+        contracted_right = np.clip(contracted_right, 0, w - 1)
+        
+        # 生成可视化到固定目录：data_adagaus_density_curve/gradient_contour_demo_output/contour_*.png
+        base_name = os.path.splitext(os.path.basename(args.image))[0]
+        target_dir = os.path.join(os.path.dirname(__file__), 'gradient_contour_demo_output')
+        os.makedirs(target_dir, exist_ok=True)
+        contour_out_path = os.path.join(target_dir, f"contour_{base_name}.png")
+            
+        visualize_gradient_contour_detection(
+            binary, contour_x, contour_y, right_edges, gradient_map,
+            smooth_x, smooth_y, contour_out_path,
+            left_edges=left_sm, contracted_left=contracted_left, contracted_right=contracted_right
+        )
+        print(f"梯度等高线检测可视化已保存: {contour_out_path}")
+
+        # 统计指标：等高线占左边缘线到右边缘线长度的平均占比
+        # 占比 = (smooth_x - left_sm) / (right_sm - left_sm)，逐行计算后对有效行求平均
+        width_lr = (right_sm - left_sm).astype(float)
+        valid_rows = (width_lr > 0) & (smooth_x.shape[0] == h)
+        ratios = np.zeros(h, dtype=float)
+        if np.any(valid_rows):
+            # 防止除零
+            safe_width = np.where(width_lr == 0, 1.0, width_lr)
+            ratios = (smooth_x - left_sm) / safe_width
+            ratios = np.clip(ratios, 0.0, 1.0)
+            avg_ratio = float(np.mean(ratios[valid_rows]))
+            print(f"等高线平均占比(相对左右边界宽度): {avg_ratio:.4f}")
+        else:
+            print("等高线平均占比(相对左右边界宽度): 无有效行")
 
     out_path = args.out
     if out_path is None:

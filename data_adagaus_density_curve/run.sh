@@ -1,0 +1,1 @@
+cd /Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_adagaus_density_curve && python test_count_black_strips.py --gradient_contour --gradient_threshold 0.2 --search_width 60 --smoothing_sigma 2.0 --contraction_ratio 0.15 --closing_size 11
