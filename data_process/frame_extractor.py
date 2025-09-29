@@ -12,6 +12,7 @@ import time
 import numpy as np
 from typing import Optional, Tuple
 import sys
+from tqdm import tqdm
 
 
 class FrameExtractor:
@@ -63,7 +64,9 @@ class FrameExtractor:
             print(f"  - 总帧数: {self.frame_count}")
             print(f"  - 时长: {self.duration:.2f} 秒")
             print(f"  - 抽帧间隔: {interval_seconds} 秒")
-            print(f"  - 预计抽取帧数: ~{self.duration / interval_seconds:.0f} 帧")
+            # 计算预计抽取帧数
+            expected_frames = int(self.duration / interval_seconds) + 1
+            print(f"  - 预计抽取帧数: ~{expected_frames} 帧")
             
             # 计算抽帧间隔（帧数）
             frame_interval = int(self.fps * interval_seconds)
@@ -76,6 +79,9 @@ class FrameExtractor:
             frame_counter = 0
             saved_frame_number = 0
             success = True
+            
+            # 创建进度条
+            progress_bar = tqdm(total=expected_frames, desc="抽帧进度", unit="帧")
             
             while success:
                 # 设置视频位置到指定帧
@@ -96,8 +102,13 @@ class FrameExtractor:
                     save_success = cv2.imwrite(output_path, frame)
                     
                     if save_success:
-                        print(f"已保存: {filename} (时间: {current_time:.2f}s)")
                         saved_frame_number += 1
+                        # 更新进度条
+                        progress_bar.update(1)
+                        progress_bar.set_postfix({
+                            '当前帧': f"{saved_frame_number:06d}",
+                            '时间': f"{current_time:.1f}s"
+                        })
                     else:
                         print(f"警告：无法保存帧到 {output_path}")
                     
@@ -111,6 +122,9 @@ class FrameExtractor:
                     # 到达视频末尾
                     break
             
+            # 关闭进度条
+            progress_bar.close()
+            
             # 关闭视频
             self.video_cap.release()
             
@@ -121,6 +135,8 @@ class FrameExtractor:
             
         except Exception as e:
             print(f"抽帧过程中发生错误：{str(e)}")
+            if 'progress_bar' in locals():
+                progress_bar.close()
             if self.video_cap:
                 self.video_cap.release()
             return False
@@ -167,14 +183,13 @@ def main(video_path: str=None, output_dir: str=None):
     """主函数 - 处理指定的视频文件"""
     # 设置路径
     if video_path is None:
-        video_path = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/Video_20250821110325928.avi"
+        video_path = "/Users/aibee/hwp/wphu个人资料/baogang/data_baogang/20250822/Video_20250821152112032.avi"
     if output_dir is None:
-        output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/images"
+        output_dir = "data_video_20250821152112032/images"
     
     # 检查视频文件存在性
     if not os.path.exists(video_path):
-        print(f"错误：视频文件不存在 - {video_path}")
-        return
+        raise ValueError(f"错误：视频文件不存在 - {video_path}")
     
     # 创建帧提取器
     extractor = FrameExtractor()
