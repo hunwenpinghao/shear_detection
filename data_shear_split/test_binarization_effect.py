@@ -8,7 +8,23 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import sys
+
+# 确保可以从项目根目录导入包（例如 data_process）
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# 兼容 feature_extractor.py 中的顶层 import config
+DATA_PROCESS_DIR = os.path.abspath(os.path.join(PROJECT_ROOT, 'data_process'))
+if DATA_PROCESS_DIR not in sys.path:
+    sys.path.insert(0, DATA_PROCESS_DIR)
+
 from shear_tear_detector import ShearTearDetector
+from data_process.feature_extractor import FeatureExtractor
+from lbp_texture_processor import LBPTextureProcessor
+from burr_processor import BurrProcessor
+from data_burr_density_curve.burr_density_analyzer import BurrDensityAnalyzer
 
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'DejaVu Sans']
@@ -119,9 +135,9 @@ def test_binarization_effects(image_path, output_path):
     filtered_adaptive_mean = apply_mask_to_binarization(processed_adaptive_mean, filled_mask)
     filtered_adaptive_gaussian = apply_mask_to_binarization(processed_adaptive_gaussian, filled_mask)
     
-    # 创建可视化（扩展为 2x4，加入“原图直接 Otsu”）
-    fig, axes = plt.subplots(2, 4, figsize=(22, 12))
-    fig.suptitle(f'Binarization Effects Comparison\n{os.path.basename(image_path)}', fontsize=16)
+    # 创建可视化（扩展为 3x4，第二行仍为二值化对比，第三行加入“Final Filled Mask 过滤后的 斑块/毛刺/纹理”）
+    fig, axes = plt.subplots(3, 4, figsize=(22, 18))
+    fig.suptitle(f'Binarization Effects Comparison (with Final Mask Filtering)\n{os.path.basename(image_path)}', fontsize=16)
     
     # 第一行：原始图像和预处理
     axes[0, 0].imshow(image, cmap='gray')
@@ -170,6 +186,53 @@ def test_binarization_effects(image_path, output_path):
     axes[1, 3].imshow(filled_mask, cmap='gray')
     axes[1, 3].set_title('Final Filled Mask\n(Left to Right Fill)')
     axes[1, 3].axis('off')
+
+    # =========================
+    # 第三行：Final Filled Mask 过滤后的斑块/毛刺/纹理（引用 FeatureExtractor 逻辑）
+    # =========================
+    extractor = FeatureExtractor()
+
+    # 斑块（使用 FeatureExtractor.detect_all_white_spots 得到整体白斑掩码后再套用 Final Mask）
+    all_spots_info = extractor.detect_all_white_spots(image)
+    spot_mask = all_spots_info.get('all_white_binary_mask', np.zeros_like(image))
+    spot_mask_filtered = spot_mask.copy()
+    spot_mask_filtered[filled_mask == 0] = 0
+    axes[2, 0].imshow(image, cmap='gray', alpha=0.7)
+    axes[2, 0].imshow(spot_mask_filtered, cmap='Reds', alpha=0.8)
+    axes[2, 0].set_title('Final Mask 过滤后的斑块图')
+    axes[2, 0].axis('off')
+
+    # 毛刺（参考 burr_processor：用 FeatureExtractor.detect_burs，并采用橙色可视化）
+    analyzer = BurrDensityAnalyzer()
+    burs_info = analyzer.feature_extractor.detect_burs(image, filled_mask)
+    burr_binary = burs_info.get('burs_binary_mask', np.zeros_like(image))
+    # 使用 analyzer 的可视化以保持与参考实现一致（橙色叠加）
+    burr_vis_bgr = analyzer.create_burr_visualization(image, burr_binary)
+    burr_vis_rgb = cv2.cvtColor(burr_vis_bgr, cv2.COLOR_BGR2RGB)
+    axes[2, 1].imshow(burr_vis_rgb)
+    axes[2, 1].set_title('Final Mask 过滤后的毛刺图')
+    axes[2, 1].axis('off')
+
+    # 纹理（使用 lbp_texture_processor 的 LBPTextureProcessor 计算并掩膜后显示）
+    try:
+        lbp_processor = LBPTextureProcessor(radius=3, n_points=24)
+        lbp_texture, _ = lbp_processor.compute_lbp_texture(image)
+        lbp_masked = lbp_texture.copy()
+        lbp_masked[filled_mask == 0] = 0
+        axes[2, 2].imshow(lbp_masked, cmap='hot')
+        axes[2, 2].set_title('Final Mask 过滤后的纹理图(LBP)')
+        axes[2, 2].axis('off')
+    except Exception:
+        # 回退显示：被掩膜的原始灰度
+        img_masked = image.copy()
+        img_masked[filled_mask == 0] = 0
+        axes[2, 2].imshow(img_masked, cmap='gray')
+        axes[2, 2].set_title('Final Mask 过滤后的纹理图(灰度)')
+        axes[2, 2].axis('off')
+
+    # 说明占位
+    axes[2, 3].text(0.5, 0.5, 'Final Filled Mask 过滤结果', ha='center', va='center', transform=axes[2, 3].transAxes)
+    axes[2, 3].axis('off')
     
     # 添加统计信息
     stats_text = f"""Binarization Statistics:
