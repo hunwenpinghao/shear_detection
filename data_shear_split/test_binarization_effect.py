@@ -56,12 +56,57 @@ def test_binarization_effects(image_path, output_path):
     
     # 生成不同二值化方法的结果
     processed_otsu = preprocess_with_binarization(image, 'otsu')
+    # 基于原始图像直接进行 Otsu（二值化直接作用于原图，不经高斯与直方图均衡）
+    _, processed_otsu_on_original = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # 基于Otsu on Original结果检测左边缘和右边缘线
+    def detect_left_right_edges(binary_image):
+        """检测二值化图像的左边缘和右边缘线"""
+        left_edges = []
+        right_edges = []
+        
+        for row in range(binary_image.shape[0]):
+            row_pixels = binary_image[row, :]
+            # 找到白色像素（255）的位置
+            white_pixels = np.where(row_pixels == 255)[0]
+            
+            if len(white_pixels) > 0:
+                left_edge = white_pixels[0]  # 最左边的白色像素
+                right_edge = white_pixels[-1]  # 最右边的白色像素
+                left_edges.append((row, left_edge))
+                right_edges.append((row, right_edge))
+            else:
+                # 如果没有白色像素，标记为-1
+                left_edges.append((row, -1))
+                right_edges.append((row, -1))
+        
+        return left_edges, right_edges
+    
+    # 检测边缘线
+    left_edges, right_edges = detect_left_right_edges(processed_otsu_on_original)
+    
+    # 创建填充mask：将左右边缘线之间的区域全部填充为白色
+    def create_filled_mask(left_edges, right_edges, image_shape):
+        """基于左右边缘线创建填充的mask"""
+        mask = np.zeros(image_shape, dtype=np.uint8)
+        
+        for i, (left_row, left_col) in enumerate(left_edges):
+            if left_col != -1 and i < len(right_edges):
+                right_row, right_col = right_edges[i]
+                if right_col != -1:
+                    # 填充从左边缘到右边缘之间的区域
+                    mask[left_row, left_col:right_col+1] = 255
+        
+        return mask
+    
+    # 创建填充mask
+    filled_mask = create_filled_mask(left_edges, right_edges, processed_otsu_on_original.shape)
     processed_adaptive_mean = preprocess_with_binarization(image, 'adaptive_mean')
     processed_adaptive_gaussian = preprocess_with_binarization(image, 'adaptive_gaussian')
     processed_fixed = preprocess_with_binarization(image, 'fixed')
     
-    # 创建可视化
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    # 创建可视化（扩展为 2x4，加入“原图直接 Otsu”）
+    fig, axes = plt.subplots(2, 4, figsize=(22, 12))
     fig.suptitle(f'Binarization Effects Comparison\n{os.path.basename(image_path)}', fontsize=16)
     
     # 第一行：原始图像和预处理
@@ -74,8 +119,25 @@ def test_binarization_effects(image_path, output_path):
     axes[0, 1].axis('off')
     
     axes[0, 2].imshow(processed_otsu, cmap='gray')
-    axes[0, 2].set_title('Otsu Binarization\n(Adaptive Threshold)')
+    axes[0, 2].set_title('Otsu on Preprocessed')
     axes[0, 2].axis('off')
+
+    # 创建带边缘线的Otsu on Original图像
+    otsu_with_edges = cv2.cvtColor(processed_otsu_on_original, cv2.COLOR_GRAY2RGB)
+    
+    # 绘制左边缘线（红色）
+    for row, col in left_edges:
+        if col != -1:
+            cv2.circle(otsu_with_edges, (col, row), 1, (255, 0, 0), -1)  # 红色点
+    
+    # 绘制右边缘线（蓝色）
+    for row, col in right_edges:
+        if col != -1:
+            cv2.circle(otsu_with_edges, (col, row), 1, (0, 0, 255), -1)  # 蓝色点
+    
+    axes[0, 3].imshow(otsu_with_edges)
+    axes[0, 3].set_title('Otsu on Original\nwith Edge Detection')
+    axes[0, 3].axis('off')
     
     # 第二行：不同二值化方法
     axes[1, 0].imshow(processed_adaptive_mean, cmap='gray')
@@ -89,6 +151,11 @@ def test_binarization_effects(image_path, output_path):
     axes[1, 2].imshow(processed_fixed, cmap='gray')
     axes[1, 2].set_title('Fixed Threshold\n(127)')
     axes[1, 2].axis('off')
+
+    # 显示填充后的最终mask图
+    axes[1, 3].imshow(filled_mask, cmap='gray')
+    axes[1, 3].set_title('Final Filled Mask\n(Left to Right Fill)')
+    axes[1, 3].axis('off')
     
     # 添加统计信息
     stats_text = f"""Binarization Statistics:
@@ -97,10 +164,24 @@ Original Preprocessing:
 Mean: {np.mean(processed_original):.1f}
 Std: {np.std(processed_original):.1f}
 
-Otsu Binarization:
+Otsu on Preprocessed:
 Mean: {np.mean(processed_otsu):.1f}
 White Pixels: {np.sum(processed_otsu == 255):,}
 Black Pixels: {np.sum(processed_otsu == 0):,}
+
+Otsu on Original:
+Mean: {np.mean(processed_otsu_on_original):.1f}
+White Pixels: {np.sum(processed_otsu_on_original == 255):,}
+Black Pixels: {np.sum(processed_otsu_on_original == 0):,}
+
+Edge Detection:
+Left Edge Points: {len([e for e in left_edges if e[1] != -1]):,}
+Right Edge Points: {len([e for e in right_edges if e[1] != -1]):,}
+
+Final Filled Mask:
+White Pixels: {np.sum(filled_mask == 255):,}
+Black Pixels: {np.sum(filled_mask == 0):,}
+Fill Ratio: {np.sum(filled_mask == 255) / (filled_mask.shape[0] * filled_mask.shape[1]) * 100:.1f}%
 
 Adaptive Mean:
 Mean: {np.mean(processed_adaptive_mean):.1f}
