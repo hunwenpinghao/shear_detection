@@ -417,7 +417,6 @@ class TwoLayerFilterAnalyzer:
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f'hill_segmentation_analysis_{column_name}.png'),
                    dpi=300, bbox_inches='tight')
-        plt.show()
         
         # 打印详细分析结果
         print(f"\n{'='*80}")

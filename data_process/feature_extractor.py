@@ -715,8 +715,6 @@ class FeatureExtractor:
         if save_path:
             plt.savefig(save_path, dpi=VIS_CONFIG['dpi'], bbox_inches='tight')
             plt.close()
-        else:
-            plt.show()
     
     def _render_cluster_visualization(self, ax, image: np.ndarray, spot_image: np.ndarray, clustering_result: Dict[str, Any]):
         """
@@ -1451,8 +1449,6 @@ class FeatureExtractor:
         if save_path:
             plt.savefig(save_path, dpi=VIS_CONFIG['dpi'], bbox_inches='tight')
             plt.close()
-        else:
-            plt.show()
 
 
 def test_feature_extraction():

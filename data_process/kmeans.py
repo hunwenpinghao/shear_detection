@@ -25,8 +25,10 @@ kmeans = KMeans(n_clusters=2, random_state=0).fit(coords)
 labels = kmeans.labels_
 
 # 4. 可视化
+save_path = "data/kmeans_result.png"
 plt.figure(figsize=(4, 12))
 plt.imshow(img_rgb)
 plt.scatter(coords[:,1], coords[:,0], c=labels, cmap="coolwarm", s=5)
 plt.axis("off")
-plt.show()
+plt.savefig(save_path, dpi=100, bbox_inches='tight')
+plt.close()

@@ -233,5 +233,3 @@ class SurfaceSegmentator:
         if save_path:
             plt.savefig(save_path, dpi=VIS_CONFIG['dpi'], bbox_inches='tight')
             plt.close()
-        else:
-            plt.show()

@@ -214,7 +214,6 @@ def visualize_results(results, save_path=None):
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     
-    plt.show()
 
 def main(image_path):
     """
