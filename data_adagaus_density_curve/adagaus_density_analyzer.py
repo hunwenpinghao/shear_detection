@@ -130,32 +130,107 @@ class AdagausDensityAnalyzer:
             return cv2.cvtColor(overlay.astype(np.uint8), cv2.COLOR_RGB2BGR)
 
     def analyze_adagaus_density(self, image_path: str, final_mask: np.ndarray, filtered_adagaus: np.ndarray):
-        """统计 Final Filled Mask 区域内的黑色块状数量与黑色块状密度(数量/总面积)"""
+        """混合法统计 Final Mask 区域内黑色块数量（梯度法与二值上升沿法取最大）。
+        同时输出基于混合计数的密度(数量/总像素)。"""
         image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
         if image is None:
             return None
         
+        h, w = image.shape
         mask_pixels = int(np.sum(final_mask > 0))
-        # 在 Final Mask 内统计黑色块：mask>0 且 filtered==0
-        black_mask = np.zeros_like(filtered_adagaus, dtype=np.uint8)
-        black_mask[(final_mask > 0) & (filtered_adagaus == 0)] = 1
-        num_labels, _ = cv2.connectedComponents(black_mask)
-        num_black_components = int(max(0, num_labels - 1))
-        
+
+        # 1) 基于 Final Mask 计算每行左/右边界
+        left_edges = np.full(h, w, dtype=int)
+        right_edges = np.full(h, -1, dtype=int)
+        for y in range(h):
+            cols = np.where(final_mask[y] > 0)[0]
+            if cols.size:
+                left_edges[y] = cols.min()
+                right_edges[y] = cols.max()
+
+        # 2) 沿弯曲扫描线统计（参数可按需调整）
+        frac = 0.25        # 扫描线位于主体左侧比例
+        edge_sigma = 5.0    # 上下方向边缘平滑
+        smooth_ksize = 9    # 梯度平滑核
+        x_window = 2        # 横向窗口半径
+
+        # 2.1 平滑左右边缘（插值缺失行）
+        yy = np.arange(h)
+        valid = (left_edges < w) & (right_edges >= 0) & (right_edges > left_edges)
+        if np.any(valid):
+            left_interp = np.interp(yy, yy[valid], left_edges[valid].astype(float))
+            right_interp = np.interp(yy, yy[valid], right_edges[valid].astype(float))
+            left_sm = gaussian_filter1d(left_interp, sigma=edge_sigma, mode='nearest')
+            right_sm = gaussian_filter1d(right_interp, sigma=edge_sigma, mode='nearest')
+            left_sm = np.clip(np.rint(left_sm), 0, w - 1).astype(int)
+            right_sm = np.clip(np.rint(right_sm), 0, w - 1).astype(int)
+        else:
+            left_sm, right_sm = left_edges, right_edges
+
+        # 2.2 计算弯曲扫描线 x 坐标
+        scan_xs = np.full(h, -1, dtype=int)
+        for y in range(h):
+            l, r = left_sm[y], right_sm[y]
+            if r > l:
+                x = int(l + frac * (r - l + 1))
+                scan_xs[y] = max(0, min(w - 1, x))
+
+        # 2.3 梯度法计数
+        sm = cv2.GaussianBlur(filtered_adagaus, (smooth_ksize, smooth_ksize), 0)
+        dy = cv2.Sobel(sm, cv2.CV_32F, 0, 1, ksize=3)
+        g_curve = np.zeros(h, dtype=float)
+        for y in range(h):
+            x = scan_xs[y]
+            if x >= 0:
+                g_curve[y] = abs(float(dy[y, x]))
+        nz = g_curve[g_curve > 0]
+        if nz.size:
+            thr = np.percentile(nz, 70)
+            if thr <= 0:
+                thr = float(np.max(g_curve)) * 0.3
+        else:
+            thr = 0.0
+        peaks = (g_curve >= thr).astype(np.uint8)
+        transitions = int(np.sum((peaks[1:] > 0) & (peaks[:-1] == 0)) + (peaks[0] > 0))
+        grad_count = max(0, transitions // 2)
+
+        # 2.4 二值上升沿计数（带横向窗口）
+        col_curve = np.zeros(h, dtype=np.uint8)
+        for y in range(h):
+            x = scan_xs[y]
+            if x >= 0:
+                if x_window > 0:
+                    xa = max(0, x - x_window)
+                    xb = min(w - 1, x + x_window)
+                    is_black = np.any(filtered_adagaus[y, xa:xb + 1] == 0)
+                    col_curve[y] = 1 if is_black else 0
+                else:
+                    col_curve[y] = 1 if filtered_adagaus[y, x] == 0 else 0
+        rising_edges = int(np.sum((col_curve[1:] == 1) & (col_curve[:-1] == 0)))
+
+        # 2.5 混合计数
+        mixed_count = max(grad_count, rising_edges)
+
+        # 2.6 黑色像素总数（Final Mask 内）
+        black_pixel_count = int(np.sum(((final_mask > 0) & (filtered_adagaus == 0)).astype(np.uint8)))
+        # 单条黑色条状物平均像素数 D_b = N_pix / N_strips
+        black_pixel_per_strip = (black_pixel_count / mixed_count) if mixed_count > 0 else 0.0
+
         frame_num = self.extract_frame_info(image_path)
         time_seconds = frame_num * 5 if frame_num > 0 else 0
-        
-        total_pixels = int(image.shape[0] * image.shape[1])
+
+        total_pixels = int(h * w)
         final_mask_coverage = (mask_pixels / total_pixels * 100.0) if total_pixels > 0 else 0.0
-        # 黑块密度：黑块数量 / 总面积（按需求定义）
-        black_count_density = (num_black_components / total_pixels) if total_pixels > 0 else 0.0
+        black_count_density = (mixed_count / total_pixels) if total_pixels > 0 else 0.0
         
         return {
             'frame_num': frame_num,
             'time_seconds': time_seconds,
             'final_mask_coverage': final_mask_coverage,
-            'black_count': num_black_components,
+            'black_count': mixed_count,
             'black_count_density': black_count_density,
+            'black_pixel_count': black_pixel_count,
+            'black_pixel_per_strip': black_pixel_per_strip,
             'image_shape': image.shape,
             'image_path': image_path
         }
@@ -222,12 +297,12 @@ class AdagausDensityAnalyzer:
             gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if gray is None:
                 continue
-            
+                
             final_mask = self.extractor._compute_final_filled_mask(gray)
             adagaus = self.extractor._adaptive_gaussian_binary(gray)
             filtered = adagaus.copy()
             filtered[final_mask == 0] = 0
-            
+                
             frame_num = self.extract_frame_info(image_path)
             out_name = f"frame_{frame_num:06d}_adagaus.png"
             out_path = os.path.join(adagaus_dir, out_name)
@@ -355,32 +430,34 @@ class AdagausDensityAnalyzer:
         time_seconds = np.array([r['time_seconds'] for r in sorted_results])
         mask_coverages = np.array([r['final_mask_coverage'] for r in sorted_results])
         black_counts = np.array([r['black_count'] for r in sorted_results])
-        black_count_densities = np.array([r['black_count_density'] for r in sorted_results])
+        # 新密度定义：每条黑条平均像素数 D_b
+        black_pixel_per_strip = np.array([r.get('black_pixel_per_strip', 0.0) for r in sorted_results])
         
         # 设置中文字体
         font_success = setup_chinese_font()
         
-        # 应用平滑滤波
-        _, smoothed_black_density, smoothed_black_count = self.apply_smoothing_filters(
+        # 应用平滑滤波（对数量使用通用方法；对 D_b 单独平滑）
+        _, _, smoothed_black_count = self.apply_smoothing_filters(
             sorted_results, smoothing_method='gaussian', window_size=50, sigma=10.0)
+        smoothed_db = gaussian_filter1d(black_pixel_per_strip, sigma=10.0)
         
-        # 创建图表
+        # 创建图表（两行）：上-D_b，新密度；下-黑条数量
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
         
-        # 黑块密度（数量/总面积）随时间（原始+平滑）
-        ax1.plot(time_seconds, black_count_densities, 'b-', linewidth=0.8, alpha=0.3, label='Raw Data')
-        ax1.plot(time_seconds, smoothed_black_density, 'b-', linewidth=2.5, alpha=0.9, label='Smoothed Curve')
-        ax1.fill_between(time_seconds, smoothed_black_density, alpha=0.3, color='blue')
+        # 新密度 D_b（每条黑条平均像素数）随时间（原始+平滑）
+        ax1.plot(time_seconds, black_pixel_per_strip, 'b-', linewidth=0.8, alpha=0.3, label='Raw Data')
+        ax1.plot(time_seconds, smoothed_db, 'b-', linewidth=2.5, alpha=0.9, label='Smoothed Curve')
+        ax1.fill_between(time_seconds, smoothed_db, alpha=0.3, color='blue')
         ax1.set_xlabel('Time (seconds)')
-        ax1.set_ylabel('Black Block Density (count / total pixels)')
-        ax1.set_title('Black Block Density Over Time (Smoothed)')
+        ax1.set_ylabel('Pixels per Black Strip (D_b)')
+        ax1.set_title('Average Pixels per Black Strip Over Time (Smoothed)')
         ax1.grid(True, alpha=0.3)
         ax1.set_xlim(0, max(time_seconds))
         
         # 添加统计信息
-        mean_density = np.mean(black_count_densities)
-        ax1.axhline(y=mean_density, color='red', linestyle='--', alpha=0.7, 
-                   label=f'Mean: {mean_density:.2f}%')
+        mean_db = np.mean(black_pixel_per_strip)
+        ax1.axhline(y=mean_db, color='red', linestyle='--', alpha=0.7, 
+                   label=f'Mean: {mean_db:.1f}')
         ax1.legend()
         
         # 黑色块状数量随时间（原始+平滑）
@@ -398,6 +475,8 @@ class AdagausDensityAnalyzer:
         ax2.axhline(y=mean_black, color='blue', linestyle='--', alpha=0.7,
                    label=f'Mean: {mean_black:.1f}')
         ax2.legend()
+
+        # 下：数量曲线保持不变
         
         # 添加滤波方法说明
         fig.suptitle('Smoothing Method: Gaussian Filter (σ=10, window=50)', fontsize=12, y=0.98)
