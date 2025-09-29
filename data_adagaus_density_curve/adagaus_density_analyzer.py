@@ -331,9 +331,17 @@ class AdagausDensityAnalyzer:
         print("开始分析 Filtered Adaptive Gaussian 二值图密度...")
         print("=" * 60)
         
+        # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
-        adagaus_dir = os.path.join(output_dir, 'adagaus_imgs')
-        os.makedirs(adagaus_dir, exist_ok=True)
+        
+        # 创建各步骤保存目录
+        step1_dir = os.path.join(output_dir, 'step1_tear_masks')
+        step2_dir = os.path.join(output_dir, 'step2_adagaus_analysis')
+        step3_dir = os.path.join(output_dir, 'step3_filtered_results')
+        
+        os.makedirs(step1_dir, exist_ok=True)
+        os.makedirs(step2_dir, exist_ok=True)
+        os.makedirs(step3_dir, exist_ok=True)
         
         import glob
         roi_pattern = os.path.join(roi_dir, "*_roi.png")
@@ -351,7 +359,9 @@ class AdagausDensityAnalyzer:
             from shear_tear_detector import ShearTearDetector
             detector = ShearTearDetector(use_contour_method=True)
         
-        for image_path in tqdm(image_files, desc="计算与统计 Adagaus", unit="图像"):
+        # 第一步：生成撕裂面mask
+        print("\n第一步：生成撕裂面mask...")
+        for image_path in tqdm(image_files, desc="生成撕裂面mask", unit="图像"):
             gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if gray is None:
                 continue
@@ -375,18 +385,86 @@ class AdagausDensityAnalyzer:
                 # 老方法：使用原始方法
                 final_mask = self.extractor._compute_final_filled_mask(gray)
             
+            frame_num = self.extract_frame_info(image_path)
+            
+            # 保存撕裂面mask
+            mask_filename = f"tear_mask_frame_{frame_num:06d}.png"
+            mask_path = os.path.join(step1_dir, mask_filename)
+            cv2.imwrite(mask_path, final_mask)
+        
+        print(f"第一步完成，撕裂面mask已保存到: {step1_dir}")
+        
+        # 第二步：生成原始Adagaus二值图
+        print("\n第二步：生成原始Adagaus二值图...")
+        for image_path in tqdm(image_files, desc="生成原始Adagaus二值图", unit="图像"):
+            gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            if gray is None:
+                continue
+                
+            frame_num = self.extract_frame_info(image_path)
+            
+            # 生成原始Adagaus二值图
             adagaus = self.extractor._adaptive_gaussian_binary(gray)
+            
+            # 保存原始Adagaus二值图
+            adagaus_filename = f"original_adagaus_frame_{frame_num:06d}.png"
+            adagaus_path = os.path.join(step2_dir, adagaus_filename)
+            cv2.imwrite(adagaus_path, adagaus)
+        
+        print(f"第二步完成，原始Adagaus二值图已保存到: {step2_dir}")
+        
+        # 第三步：根据撕裂面mask过滤二值图并生成最终结果
+        print("\n第三步：根据撕裂面mask过滤二值图...")
+        for image_path in tqdm(image_files, desc="过滤二值图并生成结果", unit="图像"):
+            gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            if gray is None:
+                continue
+                
+            # 根据方法选择不同的mask生成方式
+            if use_contour_method:
+                # 新方法：使用等高线方法生成撕裂面mask
+                result = detector.detect_surfaces(gray, visualize=False)
+                if result and 'intermediate_results' in result:
+                    tear_mask = result['intermediate_results'].get('tear_mask', None)
+                    if tear_mask is not None:
+                        # 使用等高线方法生成的撕裂面mask
+                        final_mask = tear_mask.astype(np.uint8) * 255
+                    else:
+                        # 回退到原始方法
+                        final_mask = self.extractor._compute_final_filled_mask(gray)
+                else:
+                    # 回退到原始方法
+                    final_mask = self.extractor._compute_final_filled_mask(gray)
+            else:
+                # 老方法：使用原始方法
+                final_mask = self.extractor._compute_final_filled_mask(gray)
+            
+            # 生成原始Adagaus二值图
+            adagaus = self.extractor._adaptive_gaussian_binary(gray)
+            
+            # 使用撕裂面mask过滤二值图
             filtered = adagaus.copy()
             filtered[final_mask == 0] = 0
                 
             frame_num = self.extract_frame_info(image_path)
-            out_name = f"frame_{frame_num:06d}_adagaus.png"
-            out_path = os.path.join(adagaus_dir, out_name)
-            cv2.imwrite(out_path, filtered)
             
+            # 保存过滤后的二值图
+            filtered_filename = f"filtered_adagaus_frame_{frame_num:06d}.png"
+            filtered_path = os.path.join(step3_dir, filtered_filename)
+            cv2.imwrite(filtered_path, filtered)
+            
+            # 生成过滤后的可视化图像
+            filtered_visualization = self.create_burr_visualization(gray, filtered)
+            viz_filename = f"filtered_adagaus_visualization_frame_{frame_num:06d}.png"
+            viz_path = os.path.join(step3_dir, viz_filename)
+            cv2.imwrite(viz_path, filtered_visualization)
+            
+            # 分析密度
             analysis_result = self.analyze_adagaus_density(image_path, final_mask, filtered)
             if analysis_result:
                 self.results.append(analysis_result)
+        
+        print(f"第三步完成，过滤后的二值图已保存到: {step3_dir}")
         
         self.save_results(output_dir)
         self.create_visualizations(output_dir)
