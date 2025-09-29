@@ -231,19 +231,19 @@ def main():
         print("没有找到PNG文件")
         return
     
-    test_file = png_files[0]
-    img_path = os.path.join(roi_dir, test_file)
-    
-    print("测试二值化预处理效果...")
-    print("=" * 60)
-    
-    # 测试二值化效果对比
-    output_path1 = os.path.join(output_dir, f"{os.path.splitext(test_file)[0]}_binarization_comparison.png")
-    test_binarization_effects(img_path, output_path1)
-    
-    # 测试二值化对梯度的影响
-    output_path2 = os.path.join(output_dir, f"{os.path.splitext(test_file)[0]}_binarization_gradient_analysis.png")
-    test_binarization_with_gradient(img_path, output_path2)
+    for test_file in png_files:
+        img_path = os.path.join(roi_dir, test_file)
+        
+        print("测试二值化预处理效果...")
+        print("=" * 60)
+        
+        # 测试二值化效果对比
+        output_path1 = os.path.join(output_dir, f"{os.path.splitext(test_file)[0]}_binarization_comparison.png")
+        test_binarization_effects(img_path, output_path1)
+        
+        # 测试二值化对梯度的影响
+        output_path2 = os.path.join(output_dir, f"{os.path.splitext(test_file)[0]}_binarization_gradient_analysis.png")
+        test_binarization_with_gradient(img_path, output_path2)
     
     print("\n二值化效果测试完成!")
 
