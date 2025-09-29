@@ -179,7 +179,7 @@ class FrameExtractor:
             return {"error": str(e)}
 
 
-def main(video_path: str=None, output_dir: str=None):
+def main(video_path: str=None, output_dir: str=None, interval_seconds: float=5.0):
     """主函数 - 处理指定的视频文件"""
     # 设置路径
     if video_path is None:
@@ -209,12 +209,12 @@ def main(video_path: str=None, output_dir: str=None):
     print(f"  - 时长: {video_info['duration']:.2f} 秒")
     print()
     
-    # 执行抽帧（5秒间隔）
-    print("开始视频抽帧...")
+    # 执行抽帧
+    print(f"开始视频抽帧（间隔: {interval_seconds}秒）...")
     success = extractor.extract_frames_from_video(
         video_path=video_path,
         output_dir=output_dir,
-        interval_seconds=5.0,
+        interval_seconds=interval_seconds,
         image_format='jpg'
     )
     
@@ -227,9 +227,12 @@ def main(video_path: str=None, output_dir: str=None):
 if __name__ == "__main__":
     video_path = None
     output_dir = None
+    interval_seconds = 5.0
     if len(sys.argv) > 1:
         video_path = str(sys.argv[1])
     if len(sys.argv) > 2:
         output_dir = str(sys.argv[2])
-    main(video_path, output_dir)
+    if len(sys.argv) > 3:
+        interval_seconds = float(sys.argv[3])
+    main(video_path, output_dir, interval_seconds)
     
