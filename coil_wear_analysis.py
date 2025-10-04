@@ -25,7 +25,7 @@ from scipy.signal import find_peaks, savgol_filter
 from datetime import datetime
 from tqdm import tqdm
 from math import pi
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import ruptures as rp  # 用于变化点检测
 
 # 添加主项目的模块到路径
@@ -34,6 +34,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'wear_degree_analysis', 
 from preprocessor import ImagePreprocessor
 from geometry_features import GeometryFeatureExtractor
 from visualizer import WearVisualizer
+from composite_indicator import CompositeWearIndicator
 from utils import ensure_dir
 import seaborn as sns
 
@@ -86,6 +87,7 @@ class UniversalWearAnalyzer:
         self.preprocessor = ImagePreprocessor()
         self.feature_extractor = GeometryFeatureExtractor()
         self.visualizer = WearVisualizer(output_dir)
+        self.composite_indicator = CompositeWearIndicator()
     
     def extract_features(self, save_diagnosis: bool = True) -> pd.DataFrame:
         """
@@ -157,7 +159,7 @@ class UniversalWearAnalyzer:
     
     def detect_coil_boundaries(self, df: pd.DataFrame) -> list:
         """
-        自动检测钢卷边界
+        自动检测钢卷边界（改进版：使用综合磨损指数）
         
         Args:
             df: 特征数据
@@ -168,52 +170,96 @@ class UniversalWearAnalyzer:
         print(f"\n自动检测钢卷边界...")
         print(f"钢卷数范围: {self.min_coils}-{self.max_coils}个")
         
-        # 选择多个关键特征进行分析
-        key_features = ['avg_gradient_energy', 'max_notch_depth', 'avg_rms_roughness']
+        # 优先使用综合磨损指数（如果已经计算）
+        if 'weighted_score' in df.columns:
+            print("使用综合磨损指数进行检测")
+            signal = df['weighted_score'].values
+        else:
+            # 否则使用多个关键特征的组合
+            print("使用多特征组合进行检测")
+            key_features = ['avg_gradient_energy', 'max_notch_depth', 'avg_rms_roughness']
+            
+            scaler = StandardScaler()
+            features_for_detection = []
+            
+            for feature in key_features:
+                if feature in df.columns:
+                    features_for_detection.append(df[feature].values)
+            
+            if len(features_for_detection) == 0:
+                print("警告: 没有足够的特征用于检测，使用默认分割")
+                return None
+            
+            combined_signal = np.column_stack(features_for_detection)
+            signal = scaler.fit_transform(combined_signal).mean(axis=1)
         
-        # 标准化特征
-        scaler = StandardScaler()
-        features_for_detection = []
-        
-        for feature in key_features:
-            if feature in df.columns:
-                # 平滑处理减少噪声
-                smoothed = savgol_filter(df[feature].values, 
-                                        window_length=min(51, len(df)//10*2+1), 
-                                        polyorder=3)
-                features_for_detection.append(smoothed)
-        
-        # 组合多个特征
-        if len(features_for_detection) == 0:
-            print("警告: 没有足够的特征用于检测，使用默认分割")
-            return None
-        
-        combined_signal = np.column_stack(features_for_detection)
-        combined_signal = scaler.fit_transform(combined_signal)
+        # 强力平滑，降低噪声
+        window = min(151, len(signal)//6*2+1)  # 更大的窗口
+        if window >= 5:
+            signal_smooth = savgol_filter(signal, window_length=window, polyorder=3)
+        else:
+            signal_smooth = signal
         
         # 使用Pelt算法检测变化点
         try:
-            model = "l2"  # L2损失函数
-            algo = rp.Pelt(model=model, min_size=len(df)//self.max_coils, jump=5)
-            algo.fit(combined_signal)
+            model = "rbf"  # 使用RBF核，对平滑变化更敏感
+            # 大幅增大 min_size，避免过度分割
+            min_segment_size = max(len(df)//self.max_coils, 150)  # 每段至少150帧
+            print(f"最小段长度: {min_segment_size} 帧")
+            algo = rp.Pelt(model=model, min_size=int(min_segment_size), jump=10)
+            algo.fit(signal_smooth.reshape(-1, 1))
             
-            # 尝试不同的penalty参数，找到合适的钢卷数
+            # 明确目标为9个钢卷
+            target_coils = 9
             best_boundaries = None
             best_n_coils = 0
+            best_distance = float('inf')
+            all_results = {}  # 用字典记录每个n值对应的penalty
+            found_target = False
             
-            for penalty in np.linspace(1, 10, 20):
-                boundaries = algo.predict(pen=penalty)
-                n_segments = len(boundaries)
-                
-                if self.min_coils <= n_segments <= self.max_coils:
-                    best_boundaries = boundaries
-                    best_n_coils = n_segments
-                    break
+            # 大幅扩展penalty搜索范围
+            print(f"正在搜索最优penalty参数...")
+            for penalty in np.logspace(-0.5, 4.5, 200):  # 从0.316到31623，超宽范围
+                try:
+                    boundaries = algo.predict(pen=penalty)
+                    n_segments = len(boundaries)
+                    
+                    # 记录每个分割数的首次出现
+                    if n_segments not in all_results:
+                        all_results[n_segments] = (penalty, boundaries)
+                    
+                    # 第一优先级：找到9个卷就立即使用
+                    if n_segments == target_coils:
+                        best_boundaries = boundaries
+                        best_n_coils = n_segments
+                        found_target = True
+                        print(f"✓ 找到目标钢卷数: {target_coils} (penalty={penalty:.2f})")
+                        break
+                    
+                    # 第二优先级：在合理范围内选最接近的
+                    if self.min_coils <= n_segments <= self.max_coils:
+                        distance = abs(n_segments - target_coils)
+                        if distance < best_distance:
+                            best_distance = distance
+                            best_boundaries = boundaries
+                            best_n_coils = n_segments
+                except:
+                    continue
+            
+            # 打印搜索结果摘要
+            print(f"搜索到的所有分割数: {sorted(all_results.keys())}")
             
             if best_boundaries is None:
-                # 如果没找到合适的，用中间值
-                print(f"未找到最优分割，使用默认分割")
-                return None
+                print(f"未找到最优分割")
+                print(f"检测结果摘要: 最少{min([r[1] for r in all_results])}卷, 最多{max([r[1] for r in all_results])}卷")
+                # 从所有结果中选择最接近目标值的
+                all_results_sorted = sorted(all_results, key=lambda x: abs(x[1] - target_coils))
+                if all_results_sorted:
+                    best_boundaries = all_results_sorted[0][2]
+                    best_n_coils = all_results_sorted[0][1]
+                    print(f"使用最接近的结果: {best_n_coils}卷")
+                else:
+                    return None
             
             # 去掉最后的边界点（总是等于数据长度）
             boundaries = [0] + best_boundaries[:-1]
@@ -225,6 +271,8 @@ class UniversalWearAnalyzer:
             
         except Exception as e:
             print(f"变化点检测失败: {e}")
+            import traceback
+            traceback.print_exc()
             print("使用默认均匀分割")
             return None
     
@@ -236,6 +284,23 @@ class UniversalWearAnalyzer:
             df: 特征数据
         """
         print(f"\n{'='*80}")
+        
+        # === 先计算简单的综合指标用于边界检测 ===
+        print("\n预计算简单综合指标用于钢卷检测...")
+        # 使用几个关键特征的归一化均值
+        key_features = ['avg_rms_roughness', 'max_notch_depth', 'right_peak_density']
+        temp_scores = []
+        for feat in key_features:
+            if feat in df.columns:
+                # MinMax归一化
+                vals = df[feat].values
+                if vals.max() > vals.min():
+                    normalized = (vals - vals.min()) / (vals.max() - vals.min())
+                    temp_scores.append(normalized)
+        
+        if len(temp_scores) > 0:
+            df['weighted_score'] = np.mean(temp_scores, axis=0)
+            print("✓ 临时综合指标已计算")
         
         # 自动检测钢卷边界
         boundaries = self.detect_coil_boundaries(df)
@@ -266,10 +331,28 @@ class UniversalWearAnalyzer:
         for coil_id, count in coil_counts.items():
             print(f"  第{int(coil_id)}卷: {count}帧")
         
-        # 保存带卷号的特征文件
+        # === 计算完整的综合磨损指标（会覆盖临时的） ===
+        print("\n计算完整综合磨损指标...")
+        df, analysis_results = self.composite_indicator.compute_all_indicators(df)
+        print("✓ 综合指标计算完成")
+        
+        # 保存带卷号和综合指标的特征文件
         features_dir = os.path.join(self.output_dir, 'features')
         csv_with_coils = os.path.join(features_dir, 'wear_features_with_coils.csv')
         df.to_csv(csv_with_coils, index=False, encoding='utf-8-sig')
+        
+        # 保存特征重要性分析结果
+        importance_df = analysis_results['importance_df']
+        importance_csv = os.path.join(features_dir, 'feature_importance.csv')
+        importance_df.to_csv(importance_csv, index=False, encoding='utf-8-sig')
+        print(f"✓ 特征重要性已保存: {importance_csv}")
+        
+        # 保存PCA载荷矩阵
+        pca_result = analysis_results['pca_result']
+        if len(pca_result['loadings']) > 0:
+            pca_loadings_csv = os.path.join(features_dir, 'pca_loadings.csv')
+            pca_result['loadings'].to_csv(pca_loadings_csv, encoding='utf-8-sig')
+            print(f"✓ PCA载荷已保存: {pca_loadings_csv}")
         
         # 创建可视化目录
         viz_dir = os.path.join(self.output_dir, 'visualizations')
@@ -300,8 +383,21 @@ class UniversalWearAnalyzer:
         self._plot_recommended_indicators(df, os.path.join(viz_dir, 'recommended_indicators.png'))
         print("✓ 额外分析图生成完成")
         
+        # 生成综合指标相关可视化
+        print("\n生成综合指标可视化...")
+        self._plot_feature_importance(importance_df, os.path.join(viz_dir, 'feature_importance.png'))
+        self._plot_composite_indicators_comparison(df, os.path.join(viz_dir, 'composite_indicators_comparison.png'))
+        self._plot_multi_dimension_evolution(df, n_coils, os.path.join(viz_dir, 'multi_dimension_evolution.png'))
+        self._plot_feature_contribution_heatmap(pca_result, os.path.join(viz_dir, 'feature_contribution_heatmap.png'))
+        
+        # 关键特征抽样展示
+        key_features_dir = os.path.join(viz_dir, 'key_features_samples')
+        ensure_dir(key_features_dir)
+        self._plot_key_features_samples(df, importance_df, key_features_dir)
+        print("✓ 综合指标可视化完成")
+        
         # 生成分析报告
-        self._generate_report(df, key_features, n_coils)
+        self._generate_report(df, key_features, n_coils, analysis_results)
     
     def _plot_boxplot(self, df, key_features, viz_dir):
         """绘制箱线图"""
@@ -804,15 +900,21 @@ class UniversalWearAnalyzer:
         for idx, (feat, label, color) in enumerate(features):
             ax = axes[idx // 3, idx % 3]
             if feat in df.columns:
-                # 散点图
-                ax.scatter(df['frame_id'], df[feat], alpha=0.3, s=10, color=color)
+                # 原始数据连线（显示时间连续性）
+                ax.plot(df['frame_id'], df[feat], 
+                       alpha=0.3, linewidth=1.2, color=color, 
+                       zorder=1, label='逐帧曲线')
                 
-                # 线性拟合
+                # 散点标记（标出数据点）
+                ax.scatter(df['frame_id'], df[feat], 
+                          alpha=0.4, s=15, color=color, zorder=2)
+                
+                # 线性拟合趋势线（突出整体趋势）
                 z = np.polyfit(df['frame_id'], df[feat], 1)
                 p = np.poly1d(z)
                 ax.plot(df['frame_id'], p(df['frame_id']), 
                        color='darkred', linewidth=3, linestyle='--', 
-                       label=f'线性趋势: y={z[0]:.6f}x+{z[1]:.2f}')
+                       zorder=3, label=f'线性趋势: y={z[0]:.6f}x+{z[1]:.2f}')
                 
                 # 计算趋势方向
                 trend = "增加" if z[0] > 0 else "减少"
@@ -867,18 +969,35 @@ class UniversalWearAnalyzer:
             weight = weights.get(feat, 0.25)
             wear_index += df_norm[feat].values * weight
         
-        # 1. 综合磨损指数
+        # 1. 综合磨损指数（原始 + 平滑）
         ax1 = axes[0, 0]
-        ax1.plot(df['frame_id'], wear_index, color='darkred', linewidth=2)
-        ax1.fill_between(df['frame_id'], 0, wear_index, alpha=0.3, color='red')
+        
+        # 原始数据（半透明细线）
+        ax1.plot(df['frame_id'], wear_index, color='darkred', 
+                linewidth=1, alpha=0.3, label='原始数据')
+        
+        # 平滑处理
+        from scipy.signal import savgol_filter
+        window = min(51, len(wear_index)//10*2+1)
+        if window >= 5 and len(wear_index) > window:
+            wear_index_smooth = savgol_filter(wear_index, window_length=window, polyorder=3)
+            # 平滑曲线（加粗）
+            ax1.plot(df['frame_id'], wear_index_smooth, color='darkred', 
+                    linewidth=3, alpha=1.0, label='平滑曲线')
+            ax1.fill_between(df['frame_id'], 0, wear_index_smooth, alpha=0.2, color='red')
+        else:
+            # 数据太少，不平滑
+            ax1.plot(df['frame_id'], wear_index, color='darkred', linewidth=2, label='磨损指数')
+            ax1.fill_between(df['frame_id'], 0, wear_index, alpha=0.3, color='red')
+        
         ax1.set_xlabel('帧编号', fontsize=12, fontweight='bold')
         ax1.set_ylabel('综合磨损指数 (0-1)', fontsize=12, fontweight='bold')
-        ax1.set_title('综合磨损指数（加权平均）', fontsize=14, fontweight='bold')
+        ax1.set_title('综合磨损指数（细线=原始，粗线=平滑）', fontsize=14, fontweight='bold')
         ax1.grid(True, alpha=0.3)
-        ax1.axhline(y=0.7, color='red', linestyle='--', label='警戒线')
-        ax1.legend()
+        ax1.axhline(y=0.7, color='orange', linestyle='--', linewidth=2, label='警戒线', alpha=0.8)
+        ax1.legend(fontsize=10)
         
-        # 2. 各特征贡献度
+        # 2. 各特征贡献度（原始 + 平滑）
         ax2 = axes[0, 1]
         feature_labels = {
             'avg_rms_roughness': 'RMS粗糙度',
@@ -889,12 +1008,25 @@ class UniversalWearAnalyzer:
         for feat in available:
             weight = weights.get(feat, 0.25)
             contribution = df_norm[feat].values * weight
+            
+            # 原始数据（半透明细线）
             ax2.plot(df['frame_id'], contribution, 
-                    label=feature_labels.get(feat, feat), 
-                    linewidth=1.5, alpha=0.8)
+                    linewidth=0.8, alpha=0.3)
+            
+            # 平滑曲线（加粗）
+            if window >= 5 and len(contribution) > window:
+                contribution_smooth = savgol_filter(contribution, window_length=window, polyorder=3)
+                ax2.plot(df['frame_id'], contribution_smooth,
+                        label=feature_labels.get(feat, feat), 
+                        linewidth=2.5, alpha=1.0)
+            else:
+                ax2.plot(df['frame_id'], contribution, 
+                        label=feature_labels.get(feat, feat), 
+                        linewidth=1.5, alpha=0.8)
+        
         ax2.set_xlabel('帧编号', fontsize=12, fontweight='bold')
         ax2.set_ylabel('贡献度', fontsize=12, fontweight='bold')
-        ax2.set_title('各特征对磨损指数的贡献', fontsize=14, fontweight='bold')
+        ax2.set_title('各特征贡献（细线=原始，粗线=平滑）', fontsize=14, fontweight='bold')
         ax2.legend(fontsize=9)
         ax2.grid(True, alpha=0.3)
         
@@ -943,7 +1075,328 @@ class UniversalWearAnalyzer:
         plt.close()
         print(f"已保存: {save_path}")
     
-    def _generate_report(self, df, key_features, n_coils):
+    def _plot_feature_importance(self, importance_df: pd.DataFrame, save_path: str):
+        """可视化特征重要性排序"""
+        if len(importance_df) == 0:
+            print("警告: 无特征重要性数据，跳过")
+            return
+        
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+        
+        # 1. 综合重要性得分
+        ax1 = axes[0]
+        top_features = importance_df.head(10)
+        colors = plt.cm.RdYlGn(top_features['importance_score'] / top_features['importance_score'].max())
+        bars = ax1.barh(range(len(top_features)), top_features['importance_score'], color=colors)
+        ax1.set_yticks(range(len(top_features)))
+        ax1.set_yticklabels(top_features['feature'], fontsize=10)
+        ax1.set_xlabel('综合重要性得分', fontsize=12, fontweight='bold')
+        ax1.set_title('Top 10 最重要特征', fontsize=14, fontweight='bold')
+        ax1.grid(True, alpha=0.3, axis='x')
+        ax1.invert_yaxis()
+        
+        # 2. 变异系数 vs 单调性
+        ax2 = axes[1]
+        scatter = ax2.scatter(importance_df['cv'], importance_df['monotonicity'], 
+                             s=importance_df['importance_score']*200, 
+                             c=importance_df['importance_score'], 
+                             cmap='RdYlGn', alpha=0.6, edgecolors='black', linewidth=0.5)
+        
+        # 标注top 5
+        for idx, row in importance_df.head(5).iterrows():
+            ax2.annotate(row['feature'], (row['cv'], row['monotonicity']), 
+                        fontsize=8, ha='right', alpha=0.8)
+        
+        ax2.set_xlabel('变异系数 (CV)', fontsize=12, fontweight='bold')
+        ax2.set_ylabel('单调性 (|Spearman相关|)', fontsize=12, fontweight='bold')
+        ax2.set_title('特征重要性二维分布', fontsize=14, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+        plt.colorbar(scatter, ax=ax2, label='重要性得分')
+        
+        # 3. 各维度特征数量
+        ax3 = axes[2]
+        group_counts = importance_df['group'].value_counts()
+        colors_group = ['#ff9999', '#66b3ff', '#99ff99', '#ffcc99']
+        ax3.pie(group_counts.values, labels=group_counts.index, autopct='%1.1f%%',
+               colors=colors_group, startangle=90)
+        ax3.set_title('特征维度分布', fontsize=14, fontweight='bold')
+        
+        plt.suptitle(f'{self.analysis_name} - 特征重要性分析', 
+                    fontsize=18, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"已保存: {save_path}")
+    
+    def _plot_composite_indicators_comparison(self, df: pd.DataFrame, save_path: str):
+        """可视化3种综合指标的对比"""
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # 归一化到0-1便于对比
+        scaler = MinMaxScaler()
+        
+        scores = {
+            'weighted_score': '加权平均法',
+            'pca_score': 'PCA主成分法',
+            'overall_score': '多维度法'
+        }
+        
+        # 检查哪些得分可用
+        available_scores = {k: v for k, v in scores.items() if k in df.columns}
+        
+        if len(available_scores) == 0:
+            print("警告: 无综合指标数据，跳过")
+            return
+        
+        # 1. 三种方法对比曲线（原始 + 平滑）
+        ax1 = axes[0, 0]
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c']  # 蓝、橙、绿
+        
+        for idx, (score_name, score_label) in enumerate(available_scores.items()):
+            score_values = df[score_name].values
+            # 归一化到0-1
+            if score_values.max() > score_values.min():
+                score_norm = (score_values - score_values.min()) / (score_values.max() - score_values.min())
+            else:
+                score_norm = score_values
+            
+            color = colors[idx % len(colors)]
+            
+            # 绘制原始数据（半透明）
+            ax1.plot(df['frame_id'], score_norm, color=color, 
+                    linewidth=0.8, alpha=0.3, linestyle='-')
+            
+            # 平滑处理
+            window = min(51, len(score_norm)//10*2+1)
+            if window >= 5:
+                from scipy.signal import savgol_filter
+                score_smooth = savgol_filter(score_norm, window_length=window, polyorder=3)
+                # 绘制平滑曲线
+                ax1.plot(df['frame_id'], score_smooth, color=color, 
+                        label=score_label, linewidth=2.5, alpha=1.0)
+            else:
+                ax1.plot(df['frame_id'], score_norm, color=color, 
+                        label=score_label, linewidth=2, alpha=0.8)
+        
+        ax1.set_xlabel('帧编号', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('归一化得分 (0-1)', fontsize=12, fontweight='bold')
+        ax1.set_title('3种综合指标对比（细线=原始，粗线=平滑）', fontsize=14, fontweight='bold')
+        ax1.legend(fontsize=11, loc='best')
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. 相关性矩阵
+        ax2 = axes[0, 1]
+        score_cols = list(available_scores.keys())
+        if len(score_cols) >= 2:
+            corr_matrix = df[score_cols].corr()
+            sns.heatmap(corr_matrix, annot=True, fmt='.3f', cmap='RdYlGn', 
+                       center=0.5, vmin=0, vmax=1, square=True, ax=ax2, 
+                       cbar_kws={'label': '相关系数'})
+            ax2.set_title('综合指标相关性', fontsize=14, fontweight='bold')
+        else:
+            ax2.text(0.5, 0.5, '数据不足', ha='center', va='center', fontsize=14)
+            ax2.axis('off')
+        
+        # 3. 分布对比（箱线图）
+        ax3 = axes[1, 0]
+        box_data = [df[score_name].values for score_name in available_scores.keys()]
+        box_labels = list(available_scores.values())
+        bp = ax3.boxplot(box_data, labels=box_labels, patch_artist=True)
+        for patch, color in zip(bp['boxes'], ['lightblue', 'lightgreen', 'lightyellow']):
+            patch.set_facecolor(color)
+        ax3.set_ylabel('得分', fontsize=12, fontweight='bold')
+        ax3.set_title('综合指标分布对比', fontsize=14, fontweight='bold')
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        # 4. 变化率对比
+        ax4 = axes[1, 1]
+        change_rates = []
+        for score_name in available_scores.keys():
+            values = df[score_name].values
+            if len(values) > 10:
+                first = np.mean(values[:len(values)//10])
+                last = np.mean(values[-len(values)//10:])
+                if first != 0:
+                    change_rate = ((last - first) / first) * 100
+                else:
+                    change_rate = 0
+                change_rates.append(change_rate)
+            else:
+                change_rates.append(0)
+        
+        colors_bar = ['blue' if cr > 0 else 'red' for cr in change_rates]
+        bars = ax4.bar(box_labels, change_rates, color=colors_bar, alpha=0.7)
+        ax4.set_ylabel('变化率 (%)', fontsize=12, fontweight='bold')
+        ax4.set_title('首尾变化率对比', fontsize=14, fontweight='bold')
+        ax4.axhline(y=0, color='black', linestyle='--', linewidth=1)
+        ax4.grid(True, alpha=0.3, axis='y')
+        
+        for bar, rate in zip(bars, change_rates):
+            height = bar.get_height()
+            ax4.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{rate:.1f}%', ha='center', va='bottom' if height > 0 else 'top',
+                    fontsize=10, fontweight='bold')
+        
+        plt.suptitle(f'{self.analysis_name} - 综合指标方法对比', 
+                    fontsize=18, fontweight='bold', y=1.00)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"已保存: {save_path}")
+    
+    def _plot_multi_dimension_evolution(self, df: pd.DataFrame, n_coils: int, save_path: str):
+        """可视化多维度得分的演变（雷达图）"""
+        dimensions = ['geometric_score', 'texture_score', 'frequency_score', 'distribution_score']
+        dim_labels = ['几何特征', '纹理特征', '频域特征', '统计分布']
+        
+        # 检查哪些维度可用
+        available_dims = [d for d in dimensions if d in df.columns]
+        available_labels = [dim_labels[i] for i, d in enumerate(dimensions) if d in available_dims]
+        
+        if len(available_dims) < 2:
+            print("警告: 维度得分数据不足，跳过")
+            return
+        
+        # 选择3个代表性阶段：开始、中期、结束
+        coil_ids = sorted(df['coil_id'].unique())
+        if len(coil_ids) >= 3:
+            representative_coils = [coil_ids[0], coil_ids[len(coil_ids)//2], coil_ids[-1]]
+            stage_labels = ['开始阶段', '中期阶段', '结束阶段']
+        else:
+            representative_coils = coil_ids
+            stage_labels = [f'第{int(c)}卷' for c in representative_coils]
+        
+        fig, axes = plt.subplots(1, len(representative_coils), figsize=(6*len(representative_coils), 6),
+                                subplot_kw=dict(projection='polar'))
+        
+        if len(representative_coils) == 1:
+            axes = [axes]
+        
+        angles = np.linspace(0, 2 * np.pi, len(available_dims), endpoint=False).tolist()
+        angles += angles[:1]  # 闭合
+        
+        for idx, (coil_id, stage_label) in enumerate(zip(representative_coils, stage_labels)):
+            ax = axes[idx]
+            
+            # 该卷的平均得分
+            coil_data = df[df['coil_id'] == coil_id]
+            values = [coil_data[dim].mean() for dim in available_dims]
+            values += values[:1]  # 闭合
+            
+            # 绘制雷达图
+            ax.plot(angles, values, 'o-', linewidth=2, label=stage_label, color='darkblue')
+            ax.fill(angles, values, alpha=0.25, color='blue')
+            
+            # 设置标签
+            ax.set_xticks(angles[:-1])
+            ax.set_xticklabels(available_labels, fontsize=11)
+            ax.set_ylim(0, 1)
+            ax.set_title(f'{stage_label}\n第{int(coil_id)}卷', fontsize=13, fontweight='bold', pad=20)
+            ax.grid(True)
+        
+        plt.suptitle(f'{self.analysis_name} - 多维度磨损演变分析', 
+                    fontsize=18, fontweight='bold', y=1.05)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"已保存: {save_path}")
+    
+    def _plot_feature_contribution_heatmap(self, pca_result: dict, save_path: str):
+        """可视化特征对主成分的贡献热力图"""
+        loadings = pca_result.get('loadings', pd.DataFrame())
+        
+        if len(loadings) == 0:
+            print("警告: PCA载荷数据为空，跳过")
+            return
+        
+        fig, ax = plt.subplots(figsize=(12, max(8, len(loadings)*0.3)))
+        
+        # 绘制热力图
+        sns.heatmap(loadings, annot=True, fmt='.2f', cmap='RdBu_r', 
+                   center=0, vmin=-1, vmax=1, cbar_kws={'label': '载荷值'},
+                   ax=ax, linewidths=0.5)
+        
+        ax.set_xlabel('主成分', fontsize=13, fontweight='bold')
+        ax.set_ylabel('特征名称', fontsize=13, fontweight='bold')
+        ax.set_title(f'{self.analysis_name} - 特征对主成分的贡献\n(红色=正贡献, 蓝色=负贡献)', 
+                    fontsize=16, fontweight='bold', pad=20)
+        
+        # 添加解释方差
+        if 'explained_variance_ratio' in pca_result and len(pca_result['explained_variance_ratio']) > 0:
+            explained_var = pca_result['explained_variance_ratio']
+            var_text = '解释方差: ' + ', '.join([f'PC{i+1}={v*100:.1f}%' 
+                                                 for i, v in enumerate(explained_var)])
+            plt.figtext(0.5, 0.02, var_text, ha='center', fontsize=11, style='italic')
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"已保存: {save_path}")
+    
+    def _plot_key_features_samples(self, df: pd.DataFrame, importance_df: pd.DataFrame, save_dir: str):
+        """可视化关键特征的抽样展示"""
+        if len(importance_df) == 0:
+            print("警告: 无特征重要性数据，跳过抽样展示")
+            return
+        
+        # 选择top 5特征
+        top_features = importance_df.head(5)['feature'].tolist()
+        
+        # 基于综合得分选择3个代表帧：低/中/高磨损
+        if 'overall_score' in df.columns:
+            score_col = 'overall_score'
+        elif 'weighted_score' in df.columns:
+            score_col = 'weighted_score'
+        else:
+            print("警告: 无综合得分，使用frame_id采样")
+            score_col = 'frame_id'
+        
+        # 按得分排序，取低、中、高三个分位数
+        df_sorted = df.sort_values(score_col)
+        low_idx = len(df_sorted) // 6
+        mid_idx = len(df_sorted) // 2
+        high_idx = len(df_sorted) * 5 // 6
+        
+        sample_indices = [low_idx, mid_idx, high_idx]
+        sample_labels = ['低磨损', '中度磨损', '高磨损']
+        
+        for feature in top_features:
+            if feature not in df.columns:
+                continue
+            
+            fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+            
+            for idx, (sample_idx, label) in enumerate(zip(sample_indices, sample_labels)):
+                ax = axes[idx]
+                
+                sample_row = df_sorted.iloc[sample_idx]
+                frame_id = int(sample_row['frame_id'])
+                feature_value = sample_row[feature]
+                
+                # 绘制该特征的整体曲线，并高亮当前点
+                ax.plot(df['frame_id'], df[feature], color='lightgray', linewidth=1, alpha=0.5)
+                ax.scatter([frame_id], [feature_value], color='red', s=200, zorder=5, 
+                          marker='*', edgecolors='black', linewidth=1.5)
+                
+                ax.set_xlabel('帧编号', fontsize=11, fontweight='bold')
+                ax.set_ylabel(feature, fontsize=11, fontweight='bold')
+                ax.set_title(f'{label}\n帧{frame_id}: {feature_value:.3f}', 
+                            fontsize=12, fontweight='bold')
+                ax.grid(True, alpha=0.3)
+            
+            plt.suptitle(f'{self.analysis_name} - {feature} 特征演变与典型样本', 
+                        fontsize=16, fontweight='bold')
+            plt.tight_layout()
+            
+            # 文件名安全化
+            safe_feature_name = feature.replace('/', '_').replace('\\', '_')
+            feature_save_path = os.path.join(save_dir, f'{safe_feature_name}_samples.png')
+            plt.savefig(feature_save_path, dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        print(f"已保存: {save_dir} (共{len(top_features)}个特征)")
+    
+    def _generate_report(self, df, key_features, n_coils, analysis_results=None):
         """生成分析报告"""
         print(f"\n{'='*80}")
         print(f"{self.analysis_name} - 按卷分析结论")
@@ -1000,6 +1453,59 @@ class UniversalWearAnalyzer:
                     report_lines.append(f"- {conclusion}\n")
             
             report_lines.append("\n")
+        
+        # === 添加综合指标分析 ===
+        if analysis_results is not None:
+            report_lines.append("---\n\n")
+            report_lines.append("## 综合磨损指标分析\n\n")
+            
+            # 方法对比
+            report_lines.append("### 综合评分方法对比\n\n")
+            for score_name in ['weighted_score', 'pca_score', 'overall_score']:
+                if score_name in df.columns:
+                    values = df[score_name].values
+                    if len(values) > 10:
+                        first = np.mean(values[:len(values)//10])
+                        last = np.mean(values[-len(values)//10:])
+                        if first != 0:
+                            change = ((last - first) / first) * 100
+                        else:
+                            change = 0
+                        
+                        method_names = {
+                            'weighted_score': '加权平均法',
+                            'pca_score': 'PCA主成分法',
+                            'overall_score': '多维度法'
+                        }
+                        report_lines.append(f"- **{method_names[score_name]}**: 变化率={change:+.1f}%\n")
+            
+            # PCA分析
+            pca_result = analysis_results.get('pca_result', {})
+            if 'explained_variance_ratio' in pca_result and len(pca_result['explained_variance_ratio']) > 0:
+                explained_var = pca_result['explained_variance_ratio']
+                total_explained = sum(explained_var) * 100
+                report_lines.append(f"- PCA累计解释方差: {total_explained:.1f}%\n")
+            
+            report_lines.append("\n")
+            
+            # 特征重要性Top 5
+            importance_df = analysis_results.get('importance_df', pd.DataFrame())
+            if len(importance_df) > 0:
+                report_lines.append("### 特征重要性排序 (Top 5)\n\n")
+                for idx, row in importance_df.head(5).iterrows():
+                    report_lines.append(f"{idx+1}. **{row['feature']}**: ")
+                    report_lines.append(f"重要性={row['importance_score']:.3f}, ")
+                    report_lines.append(f"单调性={row['monotonicity']:.3f}, ")
+                    report_lines.append(f"变异系数={row['cv']:.3f}\n")
+                
+                report_lines.append("\n")
+                
+                # 最强相关特征
+                top_feature = importance_df.iloc[0]
+                report_lines.append("### 磨损相关性建议\n\n")
+                report_lines.append(f"基于当前数据，**{top_feature['feature']}** ")
+                report_lines.append(f"显示出最明显的单调趋势（单调性={top_feature['monotonicity']:.3f}），")
+                report_lines.append("建议作为主要监控指标。\n")
         
         print(f"\n{'='*80}")
         print("分析完成！")
