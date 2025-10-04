@@ -157,6 +157,98 @@ class UniversalWearAnalyzer:
         
         return df
     
+    def _evaluate_segmentation_quality(self, signal: np.ndarray, boundaries: list) -> float:
+        """
+        快速评估分割质量的综合评分函数
+        
+        Args:
+            signal: 用于分割的信号
+            boundaries: 分割边界点列表
+            
+        Returns:
+            float: 综合评分，越高越好
+        """
+        if len(boundaries) < 2:
+            return -float('inf')
+        
+        # 快速计算段均值（避免创建segments列表）
+        segment_means = []
+        segment_lengths = []
+        
+        for i in range(len(boundaries)):
+            start = boundaries[i-1] if i > 0 else 0
+            end = boundaries[i] if i < len(boundaries) else len(signal)
+            
+            if end > start:
+                segment_mean = np.mean(signal[start:end])
+                segment_means.append(segment_mean)
+                segment_lengths.append(end - start)
+        
+        if len(segment_means) < 2:
+            return -float('inf')
+        
+        # 简化的评分计算（只保留最重要的指标）
+        # 1. 段间差异性（最重要）
+        between_variance = np.var(segment_means)
+        
+        # 2. 长度均匀性（简化计算）
+        length_std = np.std(segment_lengths)
+        length_mean = np.mean(segment_lengths)
+        length_uniformity = 1.0 / (1.0 + length_std / length_mean) if length_mean > 0 else 0
+        
+        # 3. 边界强度（简化计算，只检查部分边界）
+        boundary_strength = 0.0
+        check_boundaries = boundaries[1:-1][::2]  # 只检查一半的边界点
+        for boundary in check_boundaries:
+            if 1 <= boundary < len(signal) - 1:
+                gradient = abs(signal[boundary] - signal[boundary-1])
+                boundary_strength += gradient
+        boundary_strength /= max(1, len(check_boundaries))
+        
+        # 简化的综合评分
+        score = between_variance * 3.0 + boundary_strength * 1.0 + length_uniformity * 0.5
+        
+        return score
+    
+    def _validate_segmentation(self, signal: np.ndarray, boundaries: list, n_coils: int):
+        """
+        快速验证分割质量并输出关键信息
+        
+        Args:
+            signal: 用于分割的信号
+            boundaries: 分割边界点列表
+            n_coils: 钢卷数量
+        """
+        print(f"\n=== 分割质量验证 ===")
+        
+        # 快速计算段长度统计
+        segment_lengths = []
+        for i in range(len(boundaries)):
+            start = boundaries[i-1] if i > 0 else 0
+            end = boundaries[i] if i < len(boundaries) else len(signal)
+            segment_lengths.append(end - start)
+        
+        min_len, max_len = min(segment_lengths), max(segment_lengths)
+        avg_len = np.mean(segment_lengths)
+        std_len = np.std(segment_lengths)
+        
+        print(f"段长度: 最短{min_len}帧, 最长{max_len}帧, 平均{avg_len:.1f}帧")
+        print(f"长度均匀性: {std_len/avg_len:.3f} ({'均匀' if std_len/avg_len < 0.3 else '不均匀'})")
+        
+        # 简化的质量评价（复用已计算的评分）
+        quality_score = self._evaluate_segmentation_quality(signal, boundaries)
+        if quality_score > 2.0:
+            quality_level = "优秀"
+        elif quality_score > 1.0:
+            quality_level = "良好"
+        elif quality_score > 0.5:
+            quality_level = "一般"
+        else:
+            quality_level = "较差"
+        
+        print(f"分割质量: {quality_level} (评分: {quality_score:.3f})")
+        print(f"{'='*30}")
+    
     def detect_coil_boundaries(self, df: pd.DataFrame) -> list:
         """
         自动检测钢卷边界（改进版：使用综合磨损指数）
@@ -204,68 +296,85 @@ class UniversalWearAnalyzer:
         try:
             model = "rbf"  # 使用RBF核，对平滑变化更敏感
             # 大幅增大 min_size，避免过度分割
-            min_segment_size = max(len(df)//self.max_coils, 150)  # 每段至少150帧
+            min_segment_size = max(len(df)//(self.max_coils * 2), 50)  # 更灵活的最小段长度
             print(f"最小段长度: {min_segment_size} 帧")
             algo = rp.Pelt(model=model, min_size=int(min_segment_size), jump=10)
             algo.fit(signal_smooth.reshape(-1, 1))
             
-            # 明确目标为9个钢卷
-            target_coils = 9
+            # 自适应钢卷数量检测 - 不预设目标数量
             best_boundaries = None
             best_n_coils = 0
-            best_distance = float('inf')
-            all_results = {}  # 用字典记录每个n值对应的penalty
-            found_target = False
+            best_score = -float('inf')  # 使用综合评分而非距离
+            all_results = {}  # 用字典记录每个n值对应的penalty和评分
             
-            # 大幅扩展penalty搜索范围
-            print(f"正在搜索最优penalty参数...")
-            for penalty in np.logspace(-0.5, 4.5, 200):  # 从0.316到31623，超宽范围
+            # 快速自适应penalty搜索策略
+            print(f"正在搜索最优penalty参数（快速自适应检测）...")
+            
+            # 使用更少的搜索点，专注关键区域
+            penalties = np.logspace(-1, 2.5, 15)  # 从0.1到316，只用15个点
+            
+            print(f"快速搜索 {len(penalties)} 个penalty值...")
+            good_enough_score = 1.5  # 降低阈值，更容易触发早期停止
+            min_search_points = 8    # 至少搜索8个点
+            
+            for i, penalty in enumerate(penalties):
                 try:
                     boundaries = algo.predict(pen=penalty)
                     n_segments = len(boundaries)
                     
-                    # 记录每个分割数的首次出现
-                    if n_segments not in all_results:
-                        all_results[n_segments] = (penalty, boundaries)
+                    # 只考虑合理范围内的分割数
+                    if not (self.min_coils <= n_segments <= self.max_coils):
+                        continue
                     
-                    # 第一优先级：找到9个卷就立即使用
-                    if n_segments == target_coils:
+                    # 计算分割质量评分
+                    segment_score = self._evaluate_segmentation_quality(signal_smooth, boundaries)
+                    
+                    # 记录每个分割数的最佳结果
+                    if n_segments not in all_results or segment_score > all_results[n_segments][2]:
+                        all_results[n_segments] = (penalty, boundaries, segment_score)
+                    
+                    # 更新全局最佳结果
+                    if segment_score > best_score:
+                        best_score = segment_score
                         best_boundaries = boundaries
                         best_n_coils = n_segments
-                        found_target = True
-                        print(f"✓ 找到目标钢卷数: {target_coils} (penalty={penalty:.2f})")
-                        break
-                    
-                    # 第二优先级：在合理范围内选最接近的
-                    if self.min_coils <= n_segments <= self.max_coils:
-                        distance = abs(n_segments - target_coils)
-                        if distance < best_distance:
-                            best_distance = distance
-                            best_boundaries = boundaries
-                            best_n_coils = n_segments
+                        print(f"✓ 发现更优分割: {n_segments}个钢卷 (penalty={penalty:.2f}, score={segment_score:.3f})")
+                        
+                        # 更积极的早期停止策略
+                        if segment_score > good_enough_score and i >= min_search_points:
+                            print(f"✓ 找到足够好的结果，提前结束搜索 (已搜索{i+1}/{len(penalties)}个点)")
+                            break
+                        
                 except:
                     continue
             
             # 打印搜索结果摘要
             print(f"搜索到的所有分割数: {sorted(all_results.keys())}")
+            if all_results:
+                print("各分割数的最佳评分:")
+                for n_seg in sorted(all_results.keys()):
+                    penalty, _, score = all_results[n_seg]
+                    print(f"  {n_seg}个钢卷: score={score:.3f} (penalty={penalty:.2f})")
             
             if best_boundaries is None:
                 print(f"未找到最优分割")
-                print(f"检测结果摘要: 最少{min([r[1] for r in all_results])}卷, 最多{max([r[1] for r in all_results])}卷")
-                # 从所有结果中选择最接近目标值的
-                all_results_sorted = sorted(all_results, key=lambda x: abs(x[1] - target_coils))
-                if all_results_sorted:
-                    best_boundaries = all_results_sorted[0][2]
-                    best_n_coils = all_results_sorted[0][1]
-                    print(f"使用最接近的结果: {best_n_coils}卷")
+                if all_results:
+                    # 从所有结果中选择评分最高的
+                    best_result = max(all_results.values(), key=lambda x: x[2])
+                    best_boundaries = best_result[1]
+                    best_n_coils = len(best_result[1])
+                    print(f"使用评分最高的分割: {best_n_coils}个钢卷 (score={best_result[2]:.3f})")
                 else:
                     return None
             
             # 去掉最后的边界点（总是等于数据长度）
             boundaries = [0] + best_boundaries[:-1]
             
-            print(f"✓ 检测到 {len(boundaries)} 个钢卷")
+            print(f"✓ 检测到 {len(boundaries)} 个钢卷 (综合评分: {best_score:.3f})")
             print(f"边界位置: {boundaries}")
+            
+            # 添加分割质量验证
+            self._validate_segmentation(signal_smooth, boundaries, len(boundaries))
             
             return boundaries
             
@@ -316,9 +425,10 @@ class UniversalWearAnalyzer:
             
             n_coils = len(boundaries)
         else:
-            # 检测失败，使用默认均匀分割
-            print("⚠️ 自动检测失败，使用默认均匀分割（9个钢卷）")
-            n_coils = 9
+            # 检测失败，使用默认均匀分割（基于中位数钢卷数）
+            default_coils = (self.min_coils + self.max_coils) // 2
+            print(f"⚠️ 自动检测失败，使用默认均匀分割（{default_coils}个钢卷）")
+            n_coils = default_coils
             coil_size = len(df) // n_coils
             df['coil_id'] = df.index // coil_size + 1
             df.loc[df['coil_id'] > n_coils, 'coil_id'] = n_coils
