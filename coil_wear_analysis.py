@@ -16,6 +16,7 @@
 import os
 import sys
 import argparse
+import glob
 import cv2
 import numpy as np
 import pandas as pd
@@ -98,48 +99,72 @@ class UniversalWearAnalyzer:
         """
         print(f"\n开始提取{self.analysis_name}的特征...")
         
+        # 扫描实际存在的ROI文件
+        roi_files = sorted(glob.glob(os.path.join(self.roi_dir, "frame_*_roi.png")))
+        print(f"实际找到 {len(roi_files)} 个ROI文件")
+        
         # 创建诊断图目录
         if save_diagnosis:
             diagnosis_dir = os.path.join(self.output_dir, 'visualizations', 'frame_diagnosis')
             ensure_dir(diagnosis_dir)
         
         all_features = []
+        read_fail_count = 0
+        preprocess_fail_count = 0
+        extract_fail_count = 0
         
-        for frame_id in tqdm(range(self.total_frames), desc=f"提取特征"):
+        for idx, filepath in enumerate(tqdm(roi_files, desc=f"提取特征")):
             try:
-                # 构造文件路径
-                filename = f"frame_{frame_id:06d}_roi.png"
-                filepath = os.path.join(self.roi_dir, filename)
-                
-                if not os.path.exists(filepath):
-                    continue
+                # 从文件名中提取帧ID
+                basename = os.path.basename(filepath)
+                frame_id = int(basename.split('_')[1])
                 
                 # 读取图像
                 image = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
                 if image is None:
+                    read_fail_count += 1
+                    if read_fail_count <= 3:
+                        print(f"\n警告: 无法读取图像 {filepath}")
                     continue
                 
                 # 预处理
                 preprocessed = self.preprocessor.process(image)
                 
                 if not preprocessed['success']:
+                    preprocess_fail_count += 1
+                    if preprocess_fail_count <= 3:
+                        print(f"\n警告: 预处理失败 frame {frame_id}: {preprocessed.get('error', '未知错误')}")
                     continue
                 
                 # 提取特征
-                features = self.feature_extractor.extract_features(preprocessed)
-                features['frame_id'] = frame_id
-                all_features.append(features)
+                try:
+                    features = self.feature_extractor.extract_features(preprocessed)
+                    features['frame_id'] = frame_id
+                    all_features.append(features)
+                except Exception as e:
+                    extract_fail_count += 1
+                    if extract_fail_count <= 3:
+                        print(f"\n警告: 特征提取失败 frame {frame_id}: {e}")
+                    continue
                 
-                # 保存诊断图（前10帧和每100帧）
-                if save_diagnosis and (frame_id < 10 or frame_id % 100 == 0):
+                # 保存诊断图（前10个文件和每100个文件）
+                if save_diagnosis and (idx < 10 or idx % 100 == 0):
                     diagnosis_path = os.path.join(diagnosis_dir, f"frame_{frame_id:06d}_diagnosis.png")
                     self.visualizer.visualize_single_frame_diagnosis(
                         image, preprocessed, features, frame_id, diagnosis_path
                     )
                 
             except Exception as e:
-                print(f"警告: 处理帧{frame_id}时出错: {e}")
+                print(f"\n警告: 处理文件 {filepath} 时出错: {e}")
                 continue
+        
+        # 打印诊断信息
+        print(f"\n特征提取诊断:")
+        print(f"  总文件数: {len(roi_files)}")
+        print(f"  成功提取: {len(all_features)}")
+        print(f"  读取失败: {read_fail_count} 帧")
+        print(f"  预处理失败: {preprocess_fail_count} 帧")
+        print(f"  特征提取失败: {extract_fail_count} 帧")
         
         if len(all_features) == 0:
             raise RuntimeError("没有成功提取任何特征")
@@ -491,6 +516,11 @@ class UniversalWearAnalyzer:
         self._plot_wear_progression(df, os.path.join(viz_dir, 'wear_progression.png'))
         self._plot_longterm_trend(df, os.path.join(viz_dir, 'longterm_trend.png'))
         self._plot_recommended_indicators(df, os.path.join(viz_dir, 'recommended_indicators.png'))
+        
+        # 生成水平梯度能量对比图
+        if 'avg_horizontal_gradient' in df.columns:
+            self._plot_horizontal_gradient_comparison(df, os.path.join(viz_dir, 'horizontal_gradient_comparison.png'))
+        
         print("✓ 额外分析图生成完成")
         
         # 生成综合指标相关可视化
@@ -522,7 +552,9 @@ class UniversalWearAnalyzer:
             coil_data = []
             coil_labels = []
             
-            for coil_id in sorted(df['coil_id'].unique()):
+            # 过滤掉 NaN 值
+            valid_coil_ids = df['coil_id'].dropna().unique()
+            for coil_id in sorted(valid_coil_ids):
                 coil_df = df[df['coil_id'] == coil_id]
                 coil_data.append(coil_df[feature].values)
                 coil_labels.append(f'卷{int(coil_id)}')
@@ -596,7 +628,9 @@ class UniversalWearAnalyzer:
             coil_means = []
             coil_maxes = []
             
-            for coil_id in sorted(df['coil_id'].unique()):
+            # 过滤掉 NaN 值
+            valid_coil_ids = df['coil_id'].dropna().unique()
+            for coil_id in sorted(valid_coil_ids):
                 coil_df = df[df['coil_id'] == coil_id]
                 coil_ids.append(int(coil_id))
                 coil_means.append(coil_df[feature].mean())
@@ -656,9 +690,11 @@ class UniversalWearAnalyzer:
         feature_names = list(key_features.values())
         matrix_data = []
         
+        # 过滤掉 NaN 值
+        valid_coil_ids = df['coil_id'].dropna().unique()
         for feature in key_features.keys():
             row = []
-            for coil_id in sorted(df['coil_id'].unique()):
+            for coil_id in sorted(valid_coil_ids):
                 coil_df = df[df['coil_id'] == coil_id]
                 row.append(coil_df[feature].mean())
             matrix_data.append(row)
@@ -793,7 +829,9 @@ class UniversalWearAnalyzer:
             coil_q25 = []
             coil_q75 = []
             
-            for coil_id in sorted(df['coil_id'].unique()):
+            # 过滤掉 NaN 值
+            valid_coil_ids = df['coil_id'].dropna().unique()
+            for coil_id in sorted(valid_coil_ids):
                 coil_df = df[df['coil_id'] == coil_id]
                 values = coil_df[feature].values
                 
@@ -1043,6 +1081,182 @@ class UniversalWearAnalyzer:
         
         plt.suptitle(f'{self.analysis_name} - 长期磨损趋势分析（线性拟合）', 
                     fontsize=18, fontweight='bold', y=0.995)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"已保存: {save_path}")
+    
+    def _plot_horizontal_gradient_comparison(self, df: pd.DataFrame, save_path: str):
+        """绘制水平梯度能量对比图（总梯度 vs 水平梯度）"""
+        fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+        
+        # 1. 时序对比（原始数据 + 平滑 + 线性趋势）
+        ax1 = axes[0, 0]
+        
+        window = min(51, len(df)//10*2+1)
+        
+        # 绘制总梯度能量
+        if 'avg_gradient_energy' in df.columns:
+            ax1.plot(df['frame_id'], df['avg_gradient_energy'], 
+                    color='blue', alpha=0.3, linewidth=1, label='总梯度能量(原始)')
+            
+            # 平滑处理
+            if window >= 5:
+                smoothed_total = savgol_filter(df['avg_gradient_energy'].values, 
+                                              window_length=window, polyorder=3)
+                ax1.plot(df['frame_id'], smoothed_total, 
+                        color='blue', linewidth=3, label='总梯度能量(平滑)')
+            
+            # 线性趋势
+            z_total = np.polyfit(df['frame_id'], df['avg_gradient_energy'], 1)
+            p_total = np.poly1d(z_total)
+            ax1.plot(df['frame_id'], p_total(df['frame_id']), 
+                    color='darkblue', linewidth=2.5, linestyle='--', alpha=0.8,
+                    label=f'总梯度趋势(斜率={z_total[0]:.2e})')
+        
+        # 绘制水平梯度能量
+        ax1.plot(df['frame_id'], df['avg_horizontal_gradient'], 
+                color='red', alpha=0.3, linewidth=1, label='水平梯度能量(原始)')
+        
+        # 平滑处理
+        if window >= 5:
+            smoothed_horizontal = savgol_filter(df['avg_horizontal_gradient'].values, 
+                                               window_length=window, polyorder=3)
+            ax1.plot(df['frame_id'], smoothed_horizontal, 
+                    color='red', linewidth=3, label='水平梯度能量(平滑)')
+        
+        # 线性趋势
+        z_horizontal = np.polyfit(df['frame_id'], df['avg_horizontal_gradient'], 1)
+        p_horizontal = np.poly1d(z_horizontal)
+        ax1.plot(df['frame_id'], p_horizontal(df['frame_id']), 
+                color='darkred', linewidth=2.5, linestyle='--', alpha=0.8,
+                label=f'水平梯度趋势(斜率={z_horizontal[0]:.2e})')
+        
+        ax1.set_xlabel('帧编号', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('梯度能量', fontsize=12, fontweight='bold')
+        ax1.set_title('总梯度 vs 水平梯度 时序对比（含线性趋势）', fontsize=14, fontweight='bold')
+        ax1.legend(fontsize=9, loc='best')
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. 按卷统计对比
+        ax2 = axes[0, 1]
+        
+        valid_coil_ids = df['coil_id'].dropna().unique()
+        coil_ids_list = sorted(valid_coil_ids)
+        
+        total_grad_means = []
+        horizontal_grad_means = []
+        
+        for coil_id in coil_ids_list:
+            coil_df = df[df['coil_id'] == coil_id]
+            if 'avg_gradient_energy' in df.columns:
+                total_grad_means.append(coil_df['avg_gradient_energy'].mean())
+            horizontal_grad_means.append(coil_df['avg_horizontal_gradient'].mean())
+        
+        x = np.arange(len(coil_ids_list))
+        width = 0.35
+        
+        if 'avg_gradient_energy' in df.columns and len(total_grad_means) > 0:
+            bars1 = ax2.bar(x - width/2, total_grad_means, width, 
+                          label='总梯度能量', color='steelblue', alpha=0.8)
+        
+        bars2 = ax2.bar(x + width/2 if 'avg_gradient_energy' in df.columns else x, 
+                       horizontal_grad_means, width,
+                       label='水平梯度能量', color='coral', alpha=0.8)
+        
+        ax2.set_xlabel('钢卷编号', fontsize=12, fontweight='bold')
+        ax2.set_ylabel('平均梯度能量', fontsize=12, fontweight='bold')
+        ax2.set_title('各卷梯度能量对比', fontsize=14, fontweight='bold')
+        ax2.set_xticks(x)
+        ax2.set_xticklabels([f'卷{int(cid)}' for cid in coil_ids_list])
+        ax2.legend(fontsize=11)
+        ax2.grid(True, alpha=0.3, axis='y')
+        
+        # 3. 归一化对比（更清楚地看趋势 + 线性拟合）
+        ax3 = axes[1, 0]
+        
+        # 归一化到0-1
+        if 'avg_gradient_energy' in df.columns:
+            total_grad_norm = (df['avg_gradient_energy'] - df['avg_gradient_energy'].min()) / \
+                             (df['avg_gradient_energy'].max() - df['avg_gradient_energy'].min() + 1e-8)
+            if window >= 5:
+                total_grad_norm_smooth = savgol_filter(total_grad_norm.values, 
+                                                      window_length=window, polyorder=3)
+                ax3.plot(df['frame_id'], total_grad_norm_smooth, 
+                        color='blue', linewidth=3, label='总梯度能量(归一化)')
+            
+            # 线性趋势（归一化后）
+            z_total_norm = np.polyfit(df['frame_id'], total_grad_norm.values, 1)
+            p_total_norm = np.poly1d(z_total_norm)
+            ax3.plot(df['frame_id'], p_total_norm(df['frame_id']), 
+                    color='darkblue', linewidth=2, linestyle='--', alpha=0.7,
+                    label=f'总梯度线性趋势(斜率={z_total_norm[0]:.2e})')
+        
+        horizontal_grad_norm = (df['avg_horizontal_gradient'] - df['avg_horizontal_gradient'].min()) / \
+                              (df['avg_horizontal_gradient'].max() - df['avg_horizontal_gradient'].min() + 1e-8)
+        if window >= 5:
+            horizontal_grad_norm_smooth = savgol_filter(horizontal_grad_norm.values, 
+                                                       window_length=window, polyorder=3)
+            ax3.plot(df['frame_id'], horizontal_grad_norm_smooth, 
+                    color='red', linewidth=3, label='水平梯度能量(归一化)')
+        
+        # 线性趋势（归一化后）
+        z_horizontal_norm = np.polyfit(df['frame_id'], horizontal_grad_norm.values, 1)
+        p_horizontal_norm = np.poly1d(z_horizontal_norm)
+        ax3.plot(df['frame_id'], p_horizontal_norm(df['frame_id']), 
+                color='darkred', linewidth=2, linestyle='--', alpha=0.7,
+                label=f'水平梯度线性趋势(斜率={z_horizontal_norm[0]:.2e})')
+        
+        ax3.set_xlabel('帧编号', fontsize=12, fontweight='bold')
+        ax3.set_ylabel('归一化梯度能量 (0-1)', fontsize=12, fontweight='bold')
+        ax3.set_title('归一化梯度能量对比（含线性趋势）', fontsize=14, fontweight='bold')
+        ax3.legend(fontsize=9, loc='best')
+        ax3.grid(True, alpha=0.3)
+        ax3.set_ylim(-0.05, 1.05)
+        
+        # 4. 变化率统计
+        ax4 = axes[1, 1]
+        
+        # 计算首尾变化率
+        def calc_change_rate(values):
+            if len(values) > 10:
+                first = np.mean(values[:len(values)//10])
+                last = np.mean(values[-len(values)//10:])
+                if first != 0:
+                    return ((last - first) / first) * 100
+            return 0
+        
+        labels = []
+        change_rates = []
+        colors = []
+        
+        if 'avg_gradient_energy' in df.columns:
+            total_change = calc_change_rate(df['avg_gradient_energy'].values)
+            labels.append('总梯度能量')
+            change_rates.append(total_change)
+            colors.append('steelblue')
+        
+        horizontal_change = calc_change_rate(df['avg_horizontal_gradient'].values)
+        labels.append('水平梯度能量')
+        change_rates.append(horizontal_change)
+        colors.append('coral')
+        
+        bars = ax4.bar(labels, change_rates, color=colors, alpha=0.7, edgecolor='black', linewidth=2)
+        ax4.set_ylabel('变化率 (%)', fontsize=12, fontweight='bold')
+        ax4.set_title('首尾变化率对比\n(负值表示下降=磨损加重)', fontsize=14, fontweight='bold')
+        ax4.axhline(y=0, color='black', linestyle='--', linewidth=2)
+        ax4.grid(True, alpha=0.3, axis='y')
+        
+        # 添加数值标签
+        for bar, rate in zip(bars, change_rates):
+            height = bar.get_height()
+            ax4.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{rate:.1f}%', ha='center', 
+                    va='bottom' if height > 0 else 'top',
+                    fontsize=12, fontweight='bold')
+        
+        plt.suptitle(f'{self.analysis_name} - 水平梯度能量专项分析\n（水平梯度只反映垂直边缘，对刀口锐度更敏感）', 
+                    fontsize=16, fontweight='bold', y=0.995)
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
@@ -1524,10 +1738,12 @@ class UniversalWearAnalyzer:
         report_lines.append(f"总帧数: {len(df)}\n")
         report_lines.append(f"钢卷数: {n_coils}\n\n")
         
+        # 过滤掉 NaN 值
+        valid_coil_ids = df['coil_id'].dropna().unique()
         for feature, label in focus_features.items():
             coil_means = []
             coil_ids_list = []
-            for coil_id in sorted(df['coil_id'].unique()):
+            for coil_id in sorted(valid_coil_ids):
                 coil_df = df[df['coil_id'] == coil_id]
                 coil_means.append(coil_df[feature].mean())
                 coil_ids_list.append(int(coil_id))

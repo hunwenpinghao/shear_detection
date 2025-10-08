@@ -99,6 +99,57 @@
 
 --------- 后面步骤先不做 --------
 
+---
+
+## 最新更新记录
+
+### 2025-01-08: 新增水平梯度能量特征
+
+**功能说明**：
+- 在原有的"总梯度能量"基础上，新增了"水平梯度能量"特征
+- 水平梯度只计算x方向（水平方向）的Sobel梯度，专门用于捕捉垂直边缘（刀口边缘）的锐度变化
+- 相比总梯度（包含x和y两个方向），水平梯度对剪刀磨损导致的边缘钝化更加敏感
+
+**技术原理**：
+```python
+# 总梯度能量（原有）
+grad_x = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=3)
+grad_y = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=3)
+energy = mean(grad_x² + grad_y²)  # 包含所有方向
+
+# 水平梯度能量（新增）
+grad_x = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=3)
+energy = mean(grad_x²)  # 仅水平方向
+```
+
+**物理意义**：
+- 水平梯度主要反映垂直边缘（剪刀的竖直切割面）的锐度
+- 刀口锋利时：垂直边缘清晰，水平梯度大
+- 刀口磨钝时：垂直边缘模糊，水平梯度显著下降
+- **下降趋势**表示刀口钝化，磨损加重
+
+**新增可视化**：
+在运行 `coil_wear_analysis.py` 后会自动生成 `horizontal_gradient_comparison.png`，包含4个子图：
+1. **时序对比图**：总梯度 vs 水平梯度的完整时序变化（原始+平滑）
+2. **按卷统计图**：各钢卷的平均梯度能量柱状图对比
+3. **归一化趋势图**：归一化后的梯度能量变化，更清晰展示趋势差异
+4. **变化率统计**：首尾变化率对比，负值表示下降（磨损加重）
+
+**使用方法**：
+```bash
+# 运行磨损分析脚本会自动包含新特征
+python coil_wear_analysis.py --roi_dir data/roi_imgs --output_dir data/analysis --name "测试"
+
+# 输出文件中会包含：
+# - features/wear_features.csv 中的 avg_horizontal_gradient 列
+# - visualizations/horizontal_gradient_comparison.png 专项对比图
+```
+
+**特征命名**：
+- `left_horizontal_gradient`: 左侧（撕裂面）水平梯度能量
+- `right_horizontal_gradient`: 右侧（剪切面）水平梯度能量  
+- `avg_horizontal_gradient`: 左右平均水平梯度能量
+
 第二步：
 确认模型，并写出demo;
 
