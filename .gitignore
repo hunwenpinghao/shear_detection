@@ -14,3 +14,17 @@ data_replot_tear_density_curve/
 *.pyc
 .DS_Store
 *__pycache__/
+*/coil_wear_analysis/
+data_shear_split/detection_results/
+data_shear_split/split_results/
+data_shear_split/output/
+data_shear_split/roi_images/
+data_shear_split/roi_imgs/
+data_texture_density_curve/step2_shear_regions/
+data_texture_density_curve/step3_entropy_analysis/
+data_texture_density_curve/step3_texture_analysis/
+data_texture_density_curve/step1_shear_masks/
+data_texture_density_curve/output/
+data_video2_20250821140339629/
+data_video4_20250820124904881/
+data_video_20250821152112032/

@@ -23,6 +23,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib
 from scipy.signal import find_peaks, savgol_filter
+from scipy.ndimage import uniform_filter1d, maximum_filter1d
+from scipy.interpolate import UnivariateSpline
 from datetime import datetime
 from tqdm import tqdm
 from math import pi
@@ -520,6 +522,12 @@ class UniversalWearAnalyzer:
         # 生成水平梯度能量对比图
         if 'avg_horizontal_gradient' in df.columns:
             self._plot_horizontal_gradient_comparison(df, os.path.join(viz_dir, 'horizontal_gradient_comparison.png'))
+        
+        # 生成平滑长期趋势分析
+        self._plot_smooth_longterm_trends(df, os.path.join(viz_dir, 'smooth_longterm_trends.png'))
+        
+        # 生成深度趋势分析
+        self._plot_deep_trend_analysis(df, viz_dir)
         
         print("✓ 额外分析图生成完成")
         
@@ -1719,6 +1727,434 @@ class UniversalWearAnalyzer:
             plt.close()
         
         print(f"已保存: {save_dir} (共{len(top_features)}个特征)")
+    
+    def _detect_cycles_advanced(self, values, min_drop=1.5, min_cycle_length=100):
+        """
+        高级周期检测（用于平滑趋势分析）
+        
+        Args:
+            values: 信号值
+            min_drop: 最小下降幅度（标准差倍数）
+            min_cycle_length: 最小周期长度
+            
+        Returns:
+            周期列表 [(start, end), ...]
+        """
+        # 寻找局部峰值
+        peaks, _ = find_peaks(values, distance=min_cycle_length//2)
+        
+        if len(peaks) < 2:
+            return [(0, len(values)-1)]
+        
+        # 基于峰值间的谷底分割周期
+        cycles = []
+        valleys = []
+        
+        for i in range(len(peaks)-1):
+            start_peak = peaks[i]
+            end_peak = peaks[i+1]
+            
+            # 找到两峰之间的最低点
+            valley_segment = values[start_peak:end_peak+1]
+            valley_idx = start_peak + np.argmin(valley_segment)
+            
+            # 检查下降幅度
+            drop = values[start_peak] - values[valley_idx]
+            if drop > min_drop * np.std(values):
+                start_idx = 0 if i == 0 else valleys[-1]
+                cycles.append((start_idx, valley_idx))
+                valleys.append(valley_idx)
+        
+        # 添加最后一段
+        if len(cycles) > 0:
+            cycles.append((cycles[-1][1], len(values)-1))
+        else:
+            cycles.append((0, len(values)-1))
+        
+        # 过滤太短的周期
+        cycles = [(s, e) for s, e in cycles if e - s >= min_cycle_length]
+        
+        if len(cycles) == 0:
+            cycles = [(0, len(values)-1)]
+        
+        return cycles
+    
+    def _plot_smooth_longterm_trends(self, df: pd.DataFrame, save_path: str):
+        """
+        绘制平滑长期趋势分析（3种方法对比）
+        
+        包含：
+        1. 移动最大值包络线法
+        2. 周期峰值样条插值法
+        3. 全局二次拟合法
+        """
+        print("\n生成平滑长期趋势分析...")
+        
+        wear_features = {
+            'avg_rms_roughness': '平均RMS粗糙度',
+            'max_notch_depth': '最大缺口深度',
+            'right_peak_density': '右侧峰密度'
+        }
+        
+        # 创建对比图
+        fig = plt.figure(figsize=(20, 12))
+        gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.25)
+        
+        for idx, (feature, label) in enumerate(wear_features.items()):
+            if feature not in df.columns:
+                continue
+            
+            # 左侧：原始数据 + 三种平滑方法
+            ax_left = fig.add_subplot(gs[idx, 0])
+            
+            values = df[feature].values
+            frames = df['frame_id'].values
+            
+            # 原始数据（浅色）
+            ax_left.plot(frames, values, '-', alpha=0.15, color='gray', 
+                        linewidth=0.5, label='原始数据')
+            
+            # === 方法1：移动最大值包络线 ===
+            window = min(200, len(values)//5)
+            max_envelope = maximum_filter1d(values, size=window, mode='nearest')
+            if len(max_envelope) > 51:
+                smooth_env = savgol_filter(max_envelope, 
+                                          window_length=min(51, len(max_envelope)//2*2+1), 
+                                          polyorder=3)
+                ax_left.plot(frames, smooth_env, '-', color='orange', 
+                            linewidth=2.5, label='方法1:包络线', alpha=0.8)
+            
+            # === 方法2：周期峰值样条插值 ===
+            try:
+                cycles = self._detect_cycles_advanced(values)
+                cycle_frames = []
+                cycle_maxes = []
+                
+                for start, end in cycles:
+                    if end > start:
+                        max_idx = start + np.argmax(values[start:end+1])
+                        cycle_frames.append(frames[max_idx])
+                        cycle_maxes.append(values[max_idx])
+                
+                if len(cycle_frames) > 3:
+                    spline = UnivariateSpline(cycle_frames, cycle_maxes, 
+                                              k=min(3, len(cycle_frames)-1), s=5)
+                    smooth_frames = np.linspace(frames[0], frames[-1], 500)
+                    ax_left.plot(smooth_frames, spline(smooth_frames), '-', 
+                                color='green', linewidth=2.5, label='方法2:样条', alpha=0.8)
+            except Exception as e:
+                print(f"  警告: 样条插值失败 ({feature}): {e}")
+            
+            # === 方法3：全局二次拟合 ===
+            try:
+                cycle_key_frames = []
+                cycle_key_values = []
+                
+                for start, end in cycles:
+                    if end - start > 10:
+                        window_size = min(50, (end - start) // 2)
+                        if window_size >= 3:
+                            seg_smooth = uniform_filter1d(values[start:end+1], size=window_size)
+                            max_idx = start + np.argmax(seg_smooth)
+                            cycle_key_frames.append(frames[max_idx])
+                            cycle_key_values.append(values[max_idx])
+                
+                if len(cycle_key_frames) > 3:
+                    z = np.polyfit(cycle_key_frames, cycle_key_values, 2)
+                    poly_trend = np.poly1d(z)
+                    ax_left.plot(frames, poly_trend(frames), '-', 
+                                color='purple', linewidth=2.5, label='方法3:二次拟合', alpha=0.8)
+            except Exception as e:
+                print(f"  警告: 二次拟合失败 ({feature}): {e}")
+            
+            ax_left.set_xlabel('帧编号', fontweight='bold', fontsize=11)
+            ax_left.set_ylabel(label, fontweight='bold', fontsize=11)
+            ax_left.set_title(f'{label}\n三种平滑方法对比', fontsize=13, fontweight='bold')
+            ax_left.legend(fontsize=9, loc='best')
+            ax_left.grid(True, alpha=0.3)
+            
+            # 右侧：趋势斜率对比
+            ax_right = fig.add_subplot(gs[idx, 1])
+            
+            slopes = []
+            methods = []
+            colors_bar = []
+            
+            # 方法1斜率
+            if len(smooth_env) > 2:
+                z1 = np.polyfit(frames, smooth_env, 1)
+                slopes.append(z1[0])
+                methods.append('包络线')
+                colors_bar.append('orange')
+            
+            # 方法2斜率
+            if len(cycle_frames) > 3:
+                z2 = np.polyfit(cycle_frames, cycle_maxes, 1)
+                slopes.append(z2[0])
+                methods.append('样条')
+                colors_bar.append('green')
+            
+            # 方法3斜率
+            if len(cycle_key_frames) > 3:
+                z3 = np.polyfit(cycle_key_frames, cycle_key_values, 1)
+                slopes.append(z3[0])
+                methods.append('二次拟合')
+                colors_bar.append('purple')
+            
+            if slopes:
+                bars = ax_right.barh(methods, slopes, color=colors_bar, alpha=0.7, edgecolor='black', linewidth=1.5)
+                ax_right.axvline(x=0, color='black', linestyle='--', linewidth=1)
+                ax_right.set_xlabel('趋势斜率', fontweight='bold', fontsize=11)
+                ax_right.set_title(f'{label}\n方法斜率对比', fontsize=13, fontweight='bold')
+                ax_right.grid(True, alpha=0.3, axis='x')
+                
+                # 添加数值标签
+                for bar, slope in zip(bars, slopes):
+                    width = bar.get_width()
+                    ax_right.text(width, bar.get_y() + bar.get_height()/2,
+                                f'{slope:.2e}', ha='left' if width > 0 else 'right',
+                                va='center', fontsize=10, fontweight='bold')
+        
+        plt.suptitle(f'{self.analysis_name} - 平滑长期趋势分析（3种方法对比）', 
+                    fontsize=18, fontweight='bold', y=0.995)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"已保存: {save_path}")
+    
+    def _plot_deep_trend_analysis(self, df: pd.DataFrame, viz_dir: str):
+        """
+        深度趋势分析（3个子图）
+        
+        包含：
+        1. 峰值包络线分析
+        2. 分段趋势分析
+        3. 低通滤波长期趋势
+        """
+        print("\n生成深度趋势分析...")
+        
+        key_features_deep = {
+            'avg_rms_roughness': '平均RMS粗糙度',
+            'max_notch_depth': '最大缺口深度',
+            'right_peak_density': '右侧峰密度',
+            'avg_gradient_energy': '平均梯度能量'
+        }
+        
+        available_features = {k: v for k, v in key_features_deep.items() if k in df.columns}
+        
+        if len(available_features) == 0:
+            print("  警告: 无可用特征，跳过深度趋势分析")
+            return
+        
+        # === 1. 峰值包络线分析 ===
+        print("  生成峰值包络线分析...")
+        
+        def extract_envelope(signal, window=300):
+            """提取峰值包络线"""
+            envelope = []
+            frames_env = []
+            
+            for i in range(0, len(signal), max(1, window//2)):
+                window_data = signal[i:min(i+window, len(signal))]
+                if len(window_data) > 0:
+                    envelope.append(np.max(window_data))
+                    frames_env.append(i + window//2)
+            
+            return np.array(frames_env), np.array(envelope)
+        
+        fig, axes = plt.subplots(2, 2, figsize=(18, 10))
+        axes = axes.flatten()
+        
+        for idx, (feature, label) in enumerate(list(available_features.items())[:4]):
+            ax = axes[idx]
+            
+            values = df[feature].values
+            frames = df['frame_id'].values
+            
+            # 原始数据
+            ax.plot(frames, values, 'o', alpha=0.1, markersize=2, color='gray', label='原始数据')
+            
+            # 提取峰值包络线
+            window_size = min(300, len(values)//5)
+            env_frames, envelope = extract_envelope(values, window=window_size)
+            ax.plot(env_frames, envelope, 'ro-', linewidth=2, markersize=4, 
+                   label='峰值包络线', alpha=0.7)
+            
+            # 拟合包络线趋势
+            if len(envelope) > 2:
+                z = np.polyfit(env_frames, envelope, 1)
+                trend = np.poly1d(z)
+                ax.plot(env_frames, trend(env_frames), 'b--', linewidth=2.5, 
+                       label=f'趋势(斜率={z[0]:.6f})')
+                
+                # 判断趋势
+                if z[0] > 1e-6:
+                    trend_text = f"↑ 递增\n斜率: {z[0]:.6f}"
+                    color = 'lightgreen'
+                elif z[0] < -1e-6:
+                    trend_text = f"↓ 递减\n斜率: {z[0]:.6f}"
+                    color = 'lightcoral'
+                else:
+                    trend_text = f"→ 平稳\n斜率: {z[0]:.6f}"
+                    color = 'lightyellow'
+                
+                ax.text(0.02, 0.98, trend_text,
+                       transform=ax.transAxes, fontsize=11, verticalalignment='top',
+                       fontweight='bold',
+                       bbox=dict(boxstyle='round', facecolor=color, alpha=0.8, 
+                                edgecolor='black', linewidth=1.5))
+            
+            ax.set_xlabel('帧编号', fontweight='bold', fontsize=11)
+            ax.set_ylabel(label, fontweight='bold', fontsize=11)
+            ax.set_title(f'{label}\n峰值包络线分析', fontsize=12, fontweight='bold')
+            ax.legend(fontsize=9)
+            ax.grid(True, alpha=0.3)
+        
+        plt.suptitle(f'{self.analysis_name} - 峰值包络线深度分析', 
+                    fontsize=18, fontweight='bold', y=0.995)
+        plt.tight_layout()
+        plt.savefig(os.path.join(viz_dir, 'deep_envelope_analysis.png'), 
+                   dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # === 2. 分段趋势分析 ===
+        print("  生成分段趋势分析...")
+        
+        def detect_change_points(signal, threshold=2.0):
+            """检测突变点"""
+            diff = np.abs(np.diff(signal))
+            mean_diff = np.mean(diff)
+            std_diff = np.std(diff)
+            change_points = np.where(diff > mean_diff + threshold * std_diff)[0]
+            return change_points
+        
+        # 使用第一个特征检测变点
+        first_feature = list(available_features.keys())[0]
+        values_for_cp = df[first_feature].values
+        change_points = detect_change_points(values_for_cp, threshold=1.5)
+        
+        # 基于变点分段
+        segments = []
+        start = 0
+        for cp in change_points:
+            if cp - start > 50:
+                segments.append((start, cp))
+                start = cp
+        segments.append((start, len(values_for_cp)))
+        
+        fig, axes = plt.subplots(2, 2, figsize=(18, 10))
+        axes = axes.flatten()
+        
+        for idx, (feature, label) in enumerate(list(available_features.items())[:4]):
+            ax = axes[idx]
+            
+            values = df[feature].values
+            frames = df['frame_id'].values
+            
+            # 绘制原始数据
+            ax.plot(frames, values, 'o', alpha=0.2, markersize=1, color='gray')
+            
+            # 为每段计算趋势
+            colors = plt.cm.rainbow(np.linspace(0, 1, min(len(segments), 10)))
+            segment_slopes = []
+            
+            for seg_idx, (start_idx, end_idx) in enumerate(segments[:10]):
+                seg_frames = frames[start_idx:end_idx]
+                seg_values = values[start_idx:end_idx]
+                
+                if len(seg_values) > 2:
+                    z = np.polyfit(seg_frames, seg_values, 1)
+                    trend = np.poly1d(z)
+                    ax.plot(seg_frames, trend(seg_frames), '-', 
+                           color=colors[seg_idx], linewidth=2.5, alpha=0.8)
+                    segment_slopes.append(z[0])
+            
+            # 统计各段斜率
+            if segment_slopes:
+                avg_slope = np.mean(segment_slopes)
+                positive_ratio = sum(1 for s in segment_slopes if s > 0) / len(segment_slopes)
+                
+                ax.text(0.02, 0.98, 
+                       f'段数: {len(segment_slopes)}\n'
+                       f'平均斜率: {avg_slope:.6f}\n'
+                       f'递增段占比: {positive_ratio:.1%}',
+                       transform=ax.transAxes, fontsize=10, verticalalignment='top',
+                       fontweight='bold',
+                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7, 
+                                edgecolor='black', linewidth=1.5))
+            
+            ax.set_xlabel('帧编号', fontweight='bold', fontsize=11)
+            ax.set_ylabel(label, fontweight='bold', fontsize=11)
+            ax.set_title(f'{label}\n分段趋势（前10段）', fontsize=12, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+        
+        plt.suptitle(f'{self.analysis_name} - 分段趋势深度分析', 
+                    fontsize=18, fontweight='bold', y=0.995)
+        plt.tight_layout()
+        plt.savefig(os.path.join(viz_dir, 'deep_segment_analysis.png'), 
+                   dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # === 3. 低通滤波长期趋势 ===
+        print("  生成低通滤波长期趋势...")
+        
+        fig, axes = plt.subplots(2, 2, figsize=(18, 10))
+        axes = axes.flatten()
+        
+        for idx, (feature, label) in enumerate(list(available_features.items())[:4]):
+            ax = axes[idx]
+            
+            values = df[feature].values
+            frames = df['frame_id'].values
+            
+            # 原始数据
+            ax.plot(frames, values, '-', alpha=0.2, linewidth=0.5, color='gray', 
+                   label='原始数据')
+            
+            # 移动平均（窗口=100）
+            window_ma = min(100, len(values)//10)
+            if len(values) >= window_ma and window_ma >= 3:
+                ma = uniform_filter1d(values, size=window_ma)
+                ax.plot(frames, ma, 'b-', linewidth=2.5, 
+                       label=f'移动平均({window_ma})', alpha=0.8)
+                
+                # 拟合长期趋势
+                z = np.polyfit(frames, ma, 1)
+                trend = np.poly1d(z)
+                ax.plot(frames, trend(frames), 'r--', linewidth=3, 
+                       label=f'长期趋势(斜率={z[0]:.6f})')
+                
+                # 判断趋势
+                if z[0] > 1e-6:
+                    trend_text = f"✓ 长期递增\n斜率: {z[0]:.6f}"
+                    color = 'lightgreen'
+                elif z[0] < -1e-6:
+                    trend_text = f"✗ 长期递减\n斜率: {z[0]:.6f}"
+                    color = 'lightcoral'
+                else:
+                    trend_text = f"→ 长期平稳\n斜率: {z[0]:.6f}"
+                    color = 'lightyellow'
+                
+                ax.text(0.02, 0.98, trend_text,
+                       transform=ax.transAxes, fontsize=11, verticalalignment='top',
+                       fontweight='bold',
+                       bbox=dict(boxstyle='round', facecolor=color, alpha=0.8,
+                                edgecolor='black', linewidth=1.5))
+            
+            ax.set_xlabel('帧编号', fontweight='bold', fontsize=11)
+            ax.set_ylabel(label, fontweight='bold', fontsize=11)
+            ax.set_title(f'{label}\n低通滤波后的长期趋势', fontsize=12, fontweight='bold')
+            ax.legend(fontsize=9)
+            ax.grid(True, alpha=0.3)
+        
+        plt.suptitle(f'{self.analysis_name} - 低通滤波长期趋势分析', 
+                    fontsize=18, fontweight='bold', y=0.995)
+        plt.tight_layout()
+        plt.savefig(os.path.join(viz_dir, 'deep_longterm_filtered.png'), 
+                   dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print("✓ 深度趋势分析完成")
     
     def _generate_report(self, df, key_features, n_coils, analysis_results=None):
         """生成分析报告"""

@@ -189,3 +189,48 @@ data/Video_20250821140339629.avi
 验证期望：我们的模型应该能够画出整个工作过程的大体曲线。
 曲线一：纵轴是“撕裂面”/“剪切面”比值变化；横轴是时间；
 曲线二：纵轴是“白色毛刺斑块的数量或密度”；横轴是时间；
+
+---
+
+## 📢 最新更新 (2025年10月8日)
+
+### ⭐ coil_wear_analysis.py 功能增强
+
+**新增功能：**
+
+1. **平滑长期趋势分析**
+   - 集成3种高级平滑方法：移动最大值包络线、周期峰值样条插值、全局二次拟合
+   - 生成图表：`smooth_longterm_trends.png`
+   
+2. **深度趋势分析**
+   - 峰值包络线分析（自动判断趋势方向）
+   - 分段趋势分析（统计递增段占比）
+   - 低通滤波长期趋势（去除高频噪声）
+   - 生成图表：`deep_envelope_analysis.png`, `deep_segment_analysis.png`, `deep_longterm_filtered.png`
+
+**使用方法：**
+```bash
+python coil_wear_analysis.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data_analysis \
+  --name "视频分析"
+```
+
+**功能对比：**
+
+| 特性 | coil_wear_analysis.py | main_analysis.py |
+|-----|----------------------|------------------|
+| **钢卷边界检测** | ✅ 自动检测（基于ruptures） | ❌ 需手动指定参数 |
+| **综合指标** | ✅ 3种方法（加权/PCA/多维度） | ❌ 无 |
+| **平滑趋势** | ✅ 已集成（单脚本） | ✅ 需调用子脚本 |
+| **深度分析** | ✅ 已集成（单脚本） | ✅ 需调用子脚本 |
+| **运行方式** | 🎯 一键运行，自动化程度高 | 🔧 模块化，灵活性高 |
+
+**详细文档：**
+- 📖 [CHANGELOG_coil_wear_analysis.md](CHANGELOG_coil_wear_analysis.md) - 技术更新日志
+- 📘 [USAGE_EXAMPLE.md](USAGE_EXAMPLE.md) - 详细使用指南
+
+---
+
+**模型信息：** Claude Sonnet 4.5 (claude-sonnet-4-20250514)  
+**更新日期：** 2025年10月8日
