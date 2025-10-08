@@ -60,15 +60,15 @@ def setup_chinese_font():
     print("无法设置中文字体，将使用英文标签")
     return False
 
-class TearDensityAnalyzer:
-    """撕裂面密度分析器"""
+class ShearDensityAnalyzer:
+    """剪切面密度分析器"""
     
     def __init__(self):
         self.results = []
         self.feature_extractor = FeatureExtractor(PREPROCESS_CONFIG)
         
-    def analyze_tear_density(self, image_path, tear_mask):
-        """分析撕裂面斑块数量和密度 - 先用撕裂面mask过滤原图，再检测斑块"""
+    def analyze_shear_density(self, image_path, shear_mask):
+        """分析剪切面斑块数量和密度 - 先用剪切面mask过滤原图，再检测斑块"""
         
         # 读取图像
         image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -76,36 +76,36 @@ class TearDensityAnalyzer:
             return None
         
         # 确保mask是二值图像
-        if tear_mask.dtype != np.uint8:
-            tear_mask = (tear_mask > 0).astype(np.uint8) * 255
+        if shear_mask.dtype != np.uint8:
+            shear_mask = (shear_mask > 0).astype(np.uint8) * 255
         
-        # 使用撕裂面mask过滤原图，只保留撕裂面区域
-        tear_region = cv2.bitwise_and(image, image, mask=tear_mask)
+        # 使用剪切面mask过滤原图，只保留剪切面区域
+        shear_region = cv2.bitwise_and(image, image, mask=shear_mask)
         
-        # 在过滤后的撕裂面区域上使用FeatureExtractor检测斑块
-        spot_result = self.feature_extractor.detect_all_white_spots(tear_region)
+        # 在过滤后的剪切面区域上使用FeatureExtractor检测斑块
+        spot_result = self.feature_extractor.detect_all_white_spots(shear_region)
         
-        # 计算撕裂面区域密度
+        # 计算剪切面区域密度
         total_pixels = image.shape[0] * image.shape[1]
-        tear_pixels = np.sum(tear_mask > 0)
-        tear_region_density = (tear_pixels / total_pixels) * 100
-        
-        # 计算归一化斑块密度（斑块数量 / 撕裂面面积）
-        tear_area_pixels = np.sum(tear_mask > 0)
-        normalized_patch_density = spot_result.get('all_spot_count', 0) / max(tear_area_pixels, 1) * 10000  # 每万像素的斑块数量
+        shear_pixels = np.sum(shear_mask > 0)
+        shear_region_density = (shear_pixels / total_pixels) * 100
         
         # 从文件名提取时间点
         frame_num = self.extract_frame_info(image_path)
         time_seconds = frame_num * 5 if frame_num > 0 else 0  # 假设每5秒一帧
         
+        # 计算归一化斑块密度（斑块数量 / 剪切面面积）
+        shear_area_pixels = np.sum(shear_mask > 0)
+        normalized_patch_density = spot_result.get('all_spot_count', 0) / max(shear_area_pixels, 1) * 10000  # 每万像素的斑块数量
+        
         return {
             'frame_num': frame_num,
             'time_seconds': time_seconds,
-            'tear_region_density': tear_region_density,  # 撕裂面区域占整个图像的比例
-            'num_patches': spot_result.get('all_spot_count', 0),  # 撕裂面区域内的斑块数量
-            'spot_density': spot_result.get('all_spot_density', 0.0),  # 撕裂面区域内的斑块密度
-            'normalized_patch_density': normalized_patch_density,  # 归一化斑块密度（每万像素）
-            'tear_area_pixels': tear_area_pixels,  # 撕裂面面积（像素）
+            'shear_region_density': shear_region_density,  # 剪切面区域占整个图像的比例
+            'num_patches': spot_result.get('all_spot_count', 0),  # 剪切面区域内的斑块数量
+            'spot_density': spot_result.get('all_spot_density', 0.0),  # 剪切面区域内的斑块密度
+            'normalized_patch_density': normalized_patch_density,  # 归一化斑块密度（每万像素的斑块数量）
+            'shear_area_pixels': shear_area_pixels,  # 剪切面面积（像素）
             'image_shape': image.shape,
             'image_path': image_path
         }
@@ -116,34 +116,34 @@ class TearDensityAnalyzer:
                                sigma: float = 10.0):
         """对时间序列数据应用平滑滤波"""
         time_seconds = np.array([d['time_seconds'] for d in data])
-        tear_region_densities = np.array([d['tear_region_density'] for d in data])
+        shear_region_densities = np.array([d['shear_region_density'] for d in data])
         num_patches = np.array([d['num_patches'] for d in data])
         normalized_patch_densities = np.array([d['normalized_patch_density'] for d in data])
         
         if smoothing_method == 'gaussian':
             # 高斯滤波
-            smoothed_densities = gaussian_filter1d(tear_region_densities, sigma=sigma)
+            smoothed_densities = gaussian_filter1d(shear_region_densities, sigma=sigma)
             smoothed_patches = gaussian_filter1d(num_patches, sigma=sigma)
             smoothed_normalized = gaussian_filter1d(normalized_patch_densities, sigma=sigma)
             
         elif smoothing_method == 'moving_avg':
             # 移动平均滤波
-            smoothed_densities = np.convolve(tear_region_densities, np.ones(window_size)/window_size, mode='same')
+            smoothed_densities = np.convolve(shear_region_densities, np.ones(window_size)/window_size, mode='same')
             smoothed_patches = np.convolve(num_patches, np.ones(window_size)/window_size, mode='same')
             smoothed_normalized = np.convolve(normalized_patch_densities, np.ones(window_size)/window_size, mode='same')
             
         elif smoothing_method == 'savgol':
             # Savitzky-Golay滤波
-            window_length = min(window_size, len(tear_region_densities))
+            window_length = min(window_size, len(shear_region_densities))
             if window_length % 2 == 0:
                 window_length -= 1
-            smoothed_densities = signal.savgol_filter(tear_region_densities, window_length, 3)
+            smoothed_densities = signal.savgol_filter(shear_region_densities, window_length, 3)
             smoothed_patches = signal.savgol_filter(num_patches, window_length, 3)
             smoothed_normalized = signal.savgol_filter(normalized_patch_densities, window_length, 3)
             
         else:
             # 默认使用高斯滤波
-            smoothed_densities = gaussian_filter1d(tear_region_densities, sigma=sigma)
+            smoothed_densities = gaussian_filter1d(shear_region_densities, sigma=sigma)
             smoothed_patches = gaussian_filter1d(num_patches, sigma=sigma)
             smoothed_normalized = gaussian_filter1d(normalized_patch_densities, sigma=sigma)
         
@@ -160,21 +160,21 @@ class TearDensityAnalyzer:
         # 转换为结果列表格式
         self.results = []
         for _, row in df.iterrows():
-            # 计算撕裂面面积（从撕裂面区域密度反推）
+            # 计算剪切面面积（从剪切面区域密度反推）
             total_pixels = 512 * 128  # ROI图像尺寸
-            tear_area_pixels = int(row['tear_region_density'] / 100.0 * total_pixels)
+            shear_area_pixels = int(row['shear_region_density'] / 100.0 * total_pixels)
             
             # 计算归一化斑块密度
-            normalized_patch_density = row['num_patches'] / max(tear_area_pixels, 1) * 10000
+            normalized_patch_density = row['num_patches'] / max(shear_area_pixels, 1) * 10000
             
             result = {
                 'frame_num': int(row['frame_num']),
                 'time_seconds': int(row['time_seconds']),
-                'tear_region_density': row['tear_region_density'],
+                'shear_region_density': row['shear_region_density'],
                 'num_patches': int(row['num_patches']),
                 'spot_density': row['spot_density'],
                 'normalized_patch_density': normalized_patch_density,
-                'tear_area_pixels': tear_area_pixels,
+                'shear_area_pixels': shear_area_pixels,
                 'image_shape': eval(row['image_shape']),
                 'image_path': row['image_path']
             }
@@ -198,15 +198,15 @@ class TearDensityAnalyzer:
     def process_images(self, roi_dir, output_dir, use_contour_method=True):
         """按步骤处理所有图像"""
         
-        print("开始分析撕裂面密度...")
+        print("开始分析剪切面密度...")
         print("=" * 60)
         
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
         
         # 创建各步骤保存目录
-        step1_dir = os.path.join(output_dir, 'step1_tear_masks')
-        step2_dir = os.path.join(output_dir, 'step2_tear_regions')
+        step1_dir = os.path.join(output_dir, 'step1_shear_masks')
+        step2_dir = os.path.join(output_dir, 'step2_shear_regions')
         step3_dir = os.path.join(output_dir, 'step3_patch_analysis')
         
         os.makedirs(step1_dir, exist_ok=True)
@@ -224,7 +224,7 @@ class TearDensityAnalyzer:
         
         print(f"找到 {len(image_files)} 个ROI图像文件")
         
-        # 使用检测器获取撕裂面mask
+        # 使用检测器获取剪切面mask
         import sys
         sys.path.append('/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_shear_split')
         from shear_tear_detector import ShearTearDetector
@@ -233,17 +233,17 @@ class TearDensityAnalyzer:
         
         skip_step1 = True
         if not skip_step1:
-            # 第一步：生成撕裂面mask（before fill + after fill）
-            print("\n第一步：生成撕裂面mask...")
+            # 第一步：生成剪切面mask（before fill + after fill）
+            print("\n第一步：生成剪切面mask...")
             detection_results = {}  # 缓存检测结果，避免重复计算
             
-            for image_path in tqdm(image_files, desc="生成撕裂面mask", unit="图像"):
+            for image_path in tqdm(image_files, desc="生成剪切面mask", unit="图像"):
                 # 读取图像
                 image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
                 if image is None:
                     continue
                     
-                # 检测撕裂面
+                # 检测撕裂面和剪切面
                 result = detector.detect_surfaces(image, visualize=False)
                 if result and 'segmented_image' in result:
                     frame_num = self.extract_frame_info(image_path)
@@ -254,42 +254,42 @@ class TearDensityAnalyzer:
                     # 根据使用的方法保存不同的mask
                     if use_contour_method:
                         # 新方法：使用等高线方法的结果
-                        if 'tear_mask' in result.get('intermediate_results', {}):
-                            tear_mask = result['intermediate_results']['tear_mask']
-                            # 保存等高线方法生成的撕裂面mask
-                            contour_mask = tear_mask.astype(np.uint8) * 255
-                            contour_filename = f"tear_mask_contour_frame_{frame_num:06d}.png"
+                        if 'shear_mask' in result.get('intermediate_results', {}):
+                            shear_mask = result['intermediate_results']['shear_mask']
+                            # 保存等高线方法生成的剪切面mask
+                            contour_mask = shear_mask.astype(np.uint8) * 255
+                            contour_filename = f"shear_mask_contour_frame_{frame_num:06d}.png"
                             contour_path = os.path.join(step1_dir, contour_filename)
                             cv2.imwrite(contour_path, contour_mask)
                             
                             # 同时保存分割结果
                             segmented_image = result['segmented_image']
-                            after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
-                            after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                            after_fill_mask = (segmented_image == 255).astype(np.uint8) * 255  # 剪切面是255
+                            after_fill_filename = f"shear_mask_after_fill_frame_{frame_num:06d}.png"
                             after_fill_path = os.path.join(step1_dir, after_fill_filename)
                             cv2.imwrite(after_fill_path, after_fill_mask)
                     else:
                         # 老方法：保存before fill和after fill mask
-                        if 'tear_mask_original' in result:
-                            before_fill_mask = result['tear_mask_original'].astype(np.uint8) * 255
-                            before_fill_filename = f"tear_mask_before_fill_frame_{frame_num:06d}.png"
+                        if 'shear_mask_before_fill' in result.get('intermediate_results', {}):
+                            before_fill_mask = result['intermediate_results']['shear_mask_before_fill'].astype(np.uint8) * 255
+                            before_fill_filename = f"shear_mask_before_fill_frame_{frame_num:06d}.png"
                             before_fill_path = os.path.join(step1_dir, before_fill_filename)
                             cv2.imwrite(before_fill_path, before_fill_mask)
                         
                         # 保存after fill mask
                         segmented_image = result['segmented_image']
-                        after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
-                        after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                        after_fill_mask = (segmented_image == 255).astype(np.uint8) * 255  # 剪切面是255
+                        after_fill_filename = f"shear_mask_after_fill_frame_{frame_num:06d}.png"
                         after_fill_path = os.path.join(step1_dir, after_fill_filename)
                         cv2.imwrite(after_fill_path, after_fill_mask)
             
-            print(f"第一步完成，撕裂面mask已保存到: {step1_dir}")
+            print(f"第一步完成，剪切面mask已保存到: {step1_dir}")
         
         skip_step2 = True
         if not skip_step2:
-            # 第二步：应用撕裂面mask过滤出原图的撕裂面区域，并提取斑块图
-            print("\n第二步：提取撕裂面区域和斑块图...")
-            for image_path in tqdm(image_files, desc="提取撕裂面区域", unit="图像"):
+            # 第二步：应用剪切面mask过滤出原图的剪切面区域，并提取斑块图
+            print("\n第二步：提取剪切面区域和斑块图...")
+            for image_path in tqdm(image_files, desc="提取剪切面区域", unit="图像"):
                 # 读取图像
                 image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
                 if image is None:
@@ -300,75 +300,79 @@ class TearDensityAnalyzer:
                 # 检查是否已有检测结果
                 if frame_num in detection_results:
                     result = detection_results[frame_num]
-                    # 根据使用的方法提取撕裂面mask
+                    # 根据使用的方法提取剪切面mask
                     if use_contour_method:
-                        # 新方法：从等高线结果中提取撕裂面mask
-                        if 'tear_mask' in result.get('intermediate_results', {}):
-                            tear_mask = result['intermediate_results']['tear_mask'].astype(np.uint8) * 255
+                        # 新方法：从等高线结果中提取剪切面mask
+                        if 'shear_mask' in result.get('intermediate_results', {}):
+                            shear_mask = result['intermediate_results']['shear_mask'].astype(np.uint8) * 255
                         else:
                             # 回退到分割结果
                             segmented_image = result['segmented_image']
-                            tear_mask = (segmented_image == 128).astype(np.uint8) * 255
+                            shear_mask = (segmented_image == 255).astype(np.uint8) * 255  # 剪切面是255
                     else:
-                        # 老方法：从分割结果中提取撕裂面mask
+                        # 老方法：从分割结果中提取剪切面mask
                         segmented_image = result['segmented_image']
-                        tear_mask = (segmented_image == 128).astype(np.uint8) * 255
+                        shear_mask = (segmented_image == 255).astype(np.uint8) * 255  # 剪切面是255
                 else:
                     # 如果没有缓存结果，则从第一步保存的mask文件中读取
                     if use_contour_method:
                         # 新方法：优先读取等高线mask
-                        contour_filename = f"tear_mask_contour_frame_{frame_num:06d}.png"
+                        contour_filename = f"shear_mask_contour_frame_{frame_num:06d}.png"
                         contour_path = os.path.join(step1_dir, contour_filename)
                         if os.path.exists(contour_path):
-                            tear_mask = cv2.imread(contour_path, cv2.IMREAD_GRAYSCALE)
+                            shear_mask = cv2.imread(contour_path, cv2.IMREAD_GRAYSCALE)
                         else:
                             # 回退到after fill mask
-                            after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                            after_fill_filename = f"shear_mask_after_fill_frame_{frame_num:06d}.png"
                             after_fill_path = os.path.join(step1_dir, after_fill_filename)
                             if os.path.exists(after_fill_path):
-                                tear_mask = cv2.imread(after_fill_path, cv2.IMREAD_GRAYSCALE)
+                                shear_mask = cv2.imread(after_fill_path, cv2.IMREAD_GRAYSCALE)
                             else:
-                                print(f"警告：未找到帧 {frame_num} 的撕裂面mask，跳过处理")
+                                print(f"警告：未找到帧 {frame_num} 的剪切面mask，跳过处理")
                                 continue
                     else:
                         # 老方法：读取after fill mask
-                        after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                        after_fill_filename = f"shear_mask_after_fill_frame_{frame_num:06d}.png"
                         after_fill_path = os.path.join(step1_dir, after_fill_filename)
                         if os.path.exists(after_fill_path):
-                            tear_mask = cv2.imread(after_fill_path, cv2.IMREAD_GRAYSCALE)
+                            shear_mask = cv2.imread(after_fill_path, cv2.IMREAD_GRAYSCALE)
                         else:
-                            print(f"警告：未找到帧 {frame_num} 的撕裂面mask，跳过处理")
+                            print(f"警告：未找到帧 {frame_num} 的剪切面mask，跳过处理")
                             continue
                 
-                # 应用mask过滤出撕裂面区域
-                tear_region = cv2.bitwise_and(image, image, mask=tear_mask)
+                # 应用mask过滤出剪切面区域
+                shear_region = cv2.bitwise_and(image, image, mask=shear_mask)
                 
-                # 保存撕裂面区域
-                region_filename = f"tear_region_frame_{frame_num:06d}.png"
+                # 保存剪切面区域
+                region_filename = f"shear_region_frame_{frame_num:06d}.png"
                 region_path = os.path.join(step2_dir, region_filename)
-                cv2.imwrite(region_path, tear_region)
+                cv2.imwrite(region_path, shear_region)
                 
                 # 使用FeatureExtractor检测斑块
-                spot_result = self.feature_extractor.detect_all_white_spots(tear_region)
+                spot_result = self.feature_extractor.detect_all_white_spots(shear_region)
                 
                 # 保存斑块检测结果图
-                if 'spot_image' in spot_result:
-                    patch_filename = f"tear_patches_frame_{frame_num:06d}.png"
+                if 'all_white_binary_mask' in spot_result:
+                    # 创建斑块可视化图像（参考spot_processor的实现）
+                    spot_binary = spot_result['all_white_binary_mask']
+                    spot_visualization = self.create_spot_visualization(shear_region, spot_binary)
+                    
+                    patch_filename = f"shear_patches_frame_{frame_num:06d}.png"
                     patch_path = os.path.join(step2_dir, patch_filename)
-                    cv2.imwrite(patch_path, spot_result['spot_image'])
+                    cv2.imwrite(patch_path, spot_visualization)
                 
-                # 分析撕裂面密度
-                analysis_result = self.analyze_tear_density(image_path, tear_mask)
+                # 分析剪切面密度
+                analysis_result = self.analyze_shear_density(image_path, shear_mask)
                 if analysis_result:
                     self.results.append(analysis_result)
             
-            print(f"第二步完成，撕裂面区域和斑块图已保存到: {step2_dir}")
+            print(f"第二步完成，剪切面区域和斑块图已保存到: {step2_dir}")
         
         # 第三步：计算斑块数量和密度，生成变化曲线图
         print("\n第三步：计算斑块数量和密度，生成变化曲线图...")
         
         # 检查是否已有分析结果，如果有则加载并补充归一化字段
-        csv_path = os.path.join(step3_dir, 'tear_density_analysis.csv')
+        csv_path = os.path.join(step3_dir, 'shear_density_analysis.csv')
         if os.path.exists(csv_path) and len(self.results) == 0:
             print("发现现有分析结果，正在加载并补充归一化字段...")
             self.load_and_enhance_existing_results(csv_path)
@@ -382,7 +386,7 @@ class TearDensityAnalyzer:
         print(f"第三步完成，分析结果和曲线图已保存到: {step3_dir}")
         
         print("=" * 60)
-        print("撕裂面密度分析完成!")
+        print("剪切面密度分析完成!")
         print(f"所有结果已保存到: {output_dir}")
     
     def save_results(self, output_dir):
@@ -403,14 +407,14 @@ class TearDensityAnalyzer:
                     json_result[key] = value
             json_results.append(json_result)
         
-        json_path = os.path.join(output_dir, 'tear_density_analysis.json')
+        json_path = os.path.join(output_dir, 'shear_density_analysis.json')
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_results, f, indent=2, ensure_ascii=False)
         
         # 保存CSV结果
         if self.results:
             df = pd.DataFrame(self.results)
-            csv_path = os.path.join(output_dir, 'tear_density_analysis.csv')
+            csv_path = os.path.join(output_dir, 'shear_density_analysis.csv')
             df.to_csv(csv_path, index=False, encoding='utf-8')
             print(f"CSV结果已保存到: {csv_path}")
         
@@ -428,7 +432,7 @@ class TearDensityAnalyzer:
         
         # 提取数据
         time_seconds = np.array([r['time_seconds'] for r in sorted_results])
-        tear_region_densities = np.array([r['tear_region_density'] for r in sorted_results])
+        shear_region_densities = np.array([r['shear_region_density'] for r in sorted_results])
         num_patches = np.array([r['num_patches'] for r in sorted_results])
         spot_densities = np.array([r['spot_density'] for r in sorted_results])
         
@@ -439,35 +443,35 @@ class TearDensityAnalyzer:
         _, smoothed_region_densities, smoothed_patches, smoothed_normalized = self.apply_smoothing_filters(
             sorted_results, smoothing_method='gaussian', window_size=50, sigma=10.0)
         
-        # 提取归一化数据
+        # 提取归一化斑块密度数据
         normalized_patch_densities = np.array([r['normalized_patch_density'] for r in sorted_results])
         
         # 创建图表
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 15))
         
-        # 撕裂面区域密度随时间变化（原始数据+平滑曲线）
-        ax1.plot(time_seconds, tear_region_densities, 'b-', linewidth=0.8, alpha=0.3, label='原始数据')
+        # 剪切面区域密度随时间变化（原始数据+平滑曲线）
+        ax1.plot(time_seconds, shear_region_densities, 'b-', linewidth=0.8, alpha=0.3, label='原始数据')
         ax1.plot(time_seconds, smoothed_region_densities, 'b-', linewidth=2.5, alpha=0.9, label='平滑曲线')
         ax1.fill_between(time_seconds, smoothed_region_densities, alpha=0.3, color='blue')
         ax1.set_xlabel('时间 (秒)' if font_success else 'Time (seconds)')
-        ax1.set_ylabel('撕裂面区域密度 (%)' if font_success else 'Tear Region Density (%)')
-        ax1.set_title('撕裂面区域密度随时间变化 (平滑滤波)' if font_success else 'Tear Region Density Over Time (Smoothed)')
+        ax1.set_ylabel('剪切面区域密度 (%)' if font_success else 'Shear Region Density (%)')
+        ax1.set_title('剪切面区域密度随时间变化 (平滑滤波)' if font_success else 'Shear Region Density Over Time (Smoothed)')
         ax1.grid(True, alpha=0.3)
         ax1.set_xlim(0, max(time_seconds))
         
         # 添加统计信息
-        mean_density = np.mean(tear_region_densities)
+        mean_density = np.mean(shear_region_densities)
         ax1.axhline(y=mean_density, color='red', linestyle='--', alpha=0.7, 
                    label=f'平均值: {mean_density:.2f}%')
         ax1.legend()
         
-        # 撕裂面斑块数量随时间变化（原始数据+平滑曲线）
+        # 剪切面斑块数量随时间变化（原始数据+平滑曲线）
         ax2.plot(time_seconds, num_patches, 'r-', linewidth=0.8, alpha=0.3, label='原始数据')
         ax2.plot(time_seconds, smoothed_patches, 'r-', linewidth=2.5, alpha=0.9, label='平滑曲线')
         ax2.fill_between(time_seconds, smoothed_patches, alpha=0.3, color='red')
         ax2.set_xlabel('时间 (秒)' if font_success else 'Time (seconds)')
-        ax2.set_ylabel('撕裂面斑块数量' if font_success else 'Tear Patch Count')
-        ax2.set_title('撕裂面斑块数量随时间变化 (平滑滤波)' if font_success else 'Tear Patch Count Over Time (Smoothed)')
+        ax2.set_ylabel('剪切面斑块数量' if font_success else 'Shear Patch Count')
+        ax2.set_title('剪切面斑块数量随时间变化 (平滑滤波)' if font_success else 'Shear Patch Count Over Time (Smoothed)')
         ax2.grid(True, alpha=0.3)
         ax2.set_xlim(0, max(time_seconds))
         
@@ -483,7 +487,7 @@ class TearDensityAnalyzer:
         ax3.fill_between(time_seconds, smoothed_normalized, alpha=0.3, color='green')
         ax3.set_xlabel('时间 (秒)' if font_success else 'Time (seconds)')
         ax3.set_ylabel('归一化斑块密度 (每万像素)' if font_success else 'Normalized Patch Density (per 10k pixels)')
-        ax3.set_title('归一化斑块密度随时间变化 (排除撕裂面面积影响)' if font_success else 'Normalized Patch Density Over Time (Area-Independent)')
+        ax3.set_title('归一化斑块密度随时间变化 (排除剪切面面积影响)' if font_success else 'Normalized Patch Density Over Time (Area-Independent)')
         ax3.grid(True, alpha=0.3)
         ax3.set_xlim(0, max(time_seconds))
         
@@ -500,7 +504,7 @@ class TearDensityAnalyzer:
         plt.subplots_adjust(top=0.95)
         
         # 保存图表
-        plot_path = os.path.join(output_dir, 'tear_density_analysis.png')
+        plot_path = os.path.join(output_dir, 'shear_density_analysis.png')
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -514,24 +518,24 @@ class TearDensityAnalyzer:
         
         # 提取数据
         time_points = [r['time_seconds'] for r in sorted_results]
-        tear_densities = [r['tear_region_density'] for r in sorted_results]
+        shear_densities = [r['shear_region_density'] for r in sorted_results]
         num_patches = [r['num_patches'] for r in sorted_results]
         normalized_densities = [r['normalized_patch_density'] for r in sorted_results]
         
         # 创建综合图
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-        fig.suptitle('Tear Surface Analysis Summary', fontsize=16)
+        fig.suptitle('Shear Surface Analysis Summary', fontsize=16)
         
         # 密度和斑块数量对比
         ax1_twin = ax1.twinx()
         
-        line1 = ax1.plot(time_points, tear_densities, 'b-o', linewidth=2, markersize=6, label='Density (%)')
+        line1 = ax1.plot(time_points, shear_densities, 'b-o', linewidth=2, markersize=6, label='Shear Density (%)')
         line2 = ax1_twin.plot(time_points, num_patches, 'r-s', linewidth=2, markersize=6, label='Number of Patches')
         
         ax1.set_xlabel('Time Point')
-        ax1.set_ylabel('Tear Density (%)', color='b')
+        ax1.set_ylabel('Shear Density (%)', color='b')
         ax1_twin.set_ylabel('Number of Patches', color='r')
-        ax1.set_title('Tear Density vs Number of Patches')
+        ax1.set_title('Shear Density vs Number of Patches')
         ax1.grid(True, alpha=0.3)
         
         # 合并图例
@@ -547,14 +551,56 @@ class TearDensityAnalyzer:
         ax2.grid(True, alpha=0.3)
         ax2.legend()
         
+        
         plt.tight_layout()
         
         # 保存综合图
-        summary_path = os.path.join(output_dir, 'tear_density_summary.png')
+        summary_path = os.path.join(output_dir, 'shear_density_summary.png')
         plt.savefig(summary_path, dpi=300, bbox_inches='tight')
         plt.close()
         
         print(f"综合统计图已保存到: {summary_path}")
+    
+    def create_spot_visualization(self, background_image: np.ndarray, 
+                                spot_binary: np.ndarray) -> np.ndarray:
+        """
+        创建斑块可视化图像（参考spot_processor的实现）
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import io
+            from PIL import Image
+            
+            # 确保输入为灰度图
+            if len(background_image.shape) == 3:
+                gray_background = cv2.cvtColor(background_image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray_background = background_image.copy()
+            
+            # 创建可视化图像
+            fig, ax = plt.subplots(1, 1, figsize=(6, 12))
+            ax.imshow(gray_background, cmap='gray', alpha=0.7)
+            ax.imshow(spot_binary, cmap='Reds', alpha=0.8)
+            ax.axis('off')
+            
+            # 保存到内存中的字节流
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            buf.seek(0)
+            
+            # 读取图像数组并转换
+            pil_image = Image.open(buf)
+            plt.close(fig)  # 关闭图形以释放内存
+            
+            # 转换为OpenCV格式
+            opencv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            
+            return opencv_image
+            
+        except Exception as e:
+            print(f"创建斑块可视化时出错: {e}")
+            # 回退到简单的二值图像
+            return spot_binary
 
 def main():
     """主函数"""
@@ -562,7 +608,7 @@ def main():
     
     # 设置路径
     roi_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs"
-    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_tear_density_curve"
+    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_shear_density_curve"
     
     if len(sys.argv) > 1:
         roi_dir = sys.argv[1]
@@ -571,7 +617,7 @@ def main():
         output_dir = sys.argv[2]
 
     # 创建分析器
-    analyzer = TearDensityAnalyzer()
+    analyzer = ShearDensityAnalyzer()
     
     # 处理图像（默认使用新方法）
     analyzer.process_images(roi_dir, output_dir, use_contour_method=True)

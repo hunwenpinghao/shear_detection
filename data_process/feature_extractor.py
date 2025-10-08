@@ -16,6 +16,10 @@ from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN
 from sklearn.preprocessing import StandardScaler
 from config import PREPROCESS_CONFIG, VIS_CONFIG
 from font_utils import setup_chinese_font
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'data_shear_split'))
+from generate_final_mask import detect_left_right_edges, create_filled_mask
 
 
 class FeatureExtractor:
@@ -1303,8 +1307,8 @@ class FeatureExtractor:
         burs_shear_enhanced = burs_shear_info['burs_enhanced_image']
         burs_shear_binary = burs_shear_info['burs_binary_mask']
         
-        # 改为3行4列布局，增加毛刺检测图像
-        fig, axes = plt.subplots(3, 4, figsize=(32, 18))
+        # 改为4行4列布局，增加一行用于展示 Final Filled Mask 过滤后的结果
+        fig, axes = plt.subplots(4, 4, figsize=(32, 24))
         
         # 第一行图像
         # 原始图像
@@ -1443,6 +1447,54 @@ class FeatureExtractor:
                        verticalalignment='top')
         axes[2, 3].set_title('检测统计')
         axes[2, 3].axis('off')
+
+        # 第四行：使用 Final Filled Mask 过滤后的斑块、毛刺、纹理图
+        # 1) 计算 Final Filled Mask（基于 Otsu on Original 的左右边缘）
+        gray_for_mask = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+        _, otsu_on_original = cv2.threshold(gray_for_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        left_edges, right_edges = detect_left_right_edges(otsu_on_original)
+        filled_mask = create_filled_mask(left_edges, right_edges, otsu_on_original.shape)
+
+        # 2) 斑块图（应用 Final Filled Mask）
+        masked_spots = white_spots.copy()
+        masked_spots[filled_mask == 0] = 0
+        axes[3, 0].imshow(image, cmap='gray', alpha=0.7)
+        axes[3, 0].imshow(masked_spots, cmap='Reds', alpha=0.8)
+        axes[3, 0].set_title('Final Mask 过滤后的斑块图')
+        axes[3, 0].axis('off')
+
+        # 3) 毛刺图（应用 Final Filled Mask）
+        masked_burrs = burs_whole_binary.copy()
+        masked_burrs[filled_mask == 0] = 0
+        axes[3, 1].imshow(image, cmap='gray', alpha=0.7)
+        axes[3, 1].imshow(masked_burrs, cmap='Blues', alpha=0.8)
+        axes[3, 1].set_title('Final Mask 过滤后的毛刺图')
+        axes[3, 1].axis('off')
+
+        # 4) 纹理图（应用 Final Filled Mask）
+        # 使用 LBP 作为纹理表征并进行掩膜过滤
+        try:
+            from skimage.feature import local_binary_pattern
+            lbp = local_binary_pattern(gray_for_mask, P=8, R=1, method='uniform')
+            # 归一化至 0-255
+            lbp_min, lbp_max = np.min(lbp), np.max(lbp) if np.max(lbp) != np.min(lbp) else (0, 1)
+            lbp_norm = ((lbp - lbp_min) / (lbp_max - lbp_min + 1e-6) * 255).astype(np.uint8)
+            lbp_masked = lbp_norm.copy()
+            lbp_masked[filled_mask == 0] = 0
+            axes[3, 2].imshow(lbp_masked, cmap='viridis')
+            axes[3, 2].set_title('Final Mask 过滤后的纹理图(LBP)')
+            axes[3, 2].axis('off')
+        except Exception:
+            # 回退到显示被掩膜的原图以避免失败
+            img_masked = gray_for_mask.copy()
+            img_masked[filled_mask == 0] = 0
+            axes[3, 2].imshow(img_masked, cmap='gray')
+            axes[3, 2].set_title('Final Mask 过滤后的纹理图(灰度)')
+            axes[3, 2].axis('off')
+
+        # 预留一个空白或说明子图
+        axes[3, 3].text(0.5, 0.5, 'Final Filled Mask 过滤结果', ha='center', va='center', transform=axes[3, 3].transAxes)
+        axes[3, 3].axis('off')
         
         plt.tight_layout()
         

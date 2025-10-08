@@ -15,6 +15,7 @@ import sys
 import platform
 from scipy import signal
 from scipy.ndimage import gaussian_filter1d
+from skimage.feature import local_binary_pattern, graycomatrix, graycoprops
 
 # 添加data_process目录到路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'data_process'))
@@ -60,15 +61,85 @@ def setup_chinese_font():
     print("无法设置中文字体，将使用英文标签")
     return False
 
-class TearDensityAnalyzer:
-    """撕裂面密度分析器"""
+class TearTextureDensityAnalyzer:
+    """撕裂面纹理密度分析器"""
     
     def __init__(self):
         self.results = []
         self.feature_extractor = FeatureExtractor(PREPROCESS_CONFIG)
+    
+    def compute_texture_features(self, tear_region):
+        """计算纹理特征"""
         
-    def analyze_tear_density(self, image_path, tear_mask):
-        """分析撕裂面斑块数量和密度 - 先用撕裂面mask过滤原图，再检测斑块"""
+        # 确保图像不为空
+        if tear_region.size == 0 or np.all(tear_region == 0):
+            return {
+                'texture_strength': 0.0,
+                'texture_contrast': 0.0,
+                'texture_energy': 0.0,
+                'texture_homogeneity': 0.0,
+                'texture_entropy': 0.0
+            }
+        
+        # 1. 计算LBP纹理特征
+        radius = 3
+        n_points = 8 * radius
+        lbp = local_binary_pattern(tear_region, n_points, radius, method='uniform')
+        
+        # 2. 计算GLCM纹理特征
+        # 将图像量化为8个灰度级
+        gray_quantized = (tear_region // 32).astype(np.uint8)
+        
+        # 计算GLCM
+        distances = [1, 2]
+        angles = [0, np.pi/4, np.pi/2, 3*np.pi/4]
+        
+        try:
+            glcm = graycomatrix(gray_quantized, distances=distances, angles=angles, 
+                              levels=8, symmetric=True, normed=True)
+            
+            # 计算GLCM特征
+            contrast = graycoprops(glcm, 'contrast').mean()
+            energy = graycoprops(glcm, 'energy').mean()
+            homogeneity = graycoprops(glcm, 'homogeneity').mean()
+            
+        except Exception as e:
+            print(f"GLCM计算出错: {e}")
+            contrast = energy = homogeneity = 0.0
+        
+        # 3. 计算梯度纹理特征
+        grad_x = cv2.Sobel(tear_region, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(tear_region, cv2.CV_64F, 0, 1, ksize=3)
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        
+        # 4. 计算拉普拉斯纹理特征
+        laplacian = cv2.Laplacian(tear_region, cv2.CV_64F)
+        
+        # 5. 综合纹理强度（多种纹理特征的加权组合）
+        texture_strength = (
+            0.3 * np.mean(gradient_magnitude) +      # 梯度强度
+            0.2 * np.mean(np.abs(laplacian)) +       # 拉普拉斯强度
+            0.2 * np.std(tear_region) +              # 灰度标准差
+            0.15 * np.mean(lbp) +                    # LBP强度
+            0.15 * contrast                          # GLCM对比度
+        )
+        
+        # 6. 计算纹理熵（基于灰度直方图）
+        hist, _ = np.histogram(tear_region, bins=256, range=(0, 256))
+        hist = hist.astype(float)
+        hist /= (hist.sum() + 1e-7)
+        entropy = -np.sum(hist * np.log2(hist + 1e-7))
+        
+        return {
+            'texture_strength': texture_strength,
+            'texture_contrast': contrast,
+            'texture_energy': energy,
+            'texture_homogeneity': homogeneity,
+            'texture_entropy': entropy
+        }
+    
+    def analyze_tear_texture_density(self, image_path, tear_mask):
+        """分析撕裂面纹理密度"""
         
         # 读取图像
         image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -82,17 +153,17 @@ class TearDensityAnalyzer:
         # 使用撕裂面mask过滤原图，只保留撕裂面区域
         tear_region = cv2.bitwise_and(image, image, mask=tear_mask)
         
-        # 在过滤后的撕裂面区域上使用FeatureExtractor检测斑块
-        spot_result = self.feature_extractor.detect_all_white_spots(tear_region)
-        
         # 计算撕裂面区域密度
         total_pixels = image.shape[0] * image.shape[1]
         tear_pixels = np.sum(tear_mask > 0)
         tear_region_density = (tear_pixels / total_pixels) * 100
         
-        # 计算归一化斑块密度（斑块数量 / 撕裂面面积）
+        # 计算纹理特征
+        texture_features = self.compute_texture_features(tear_region)
+        
+        # 计算归一化纹理密度（纹理强度 / 撕裂面面积）
         tear_area_pixels = np.sum(tear_mask > 0)
-        normalized_patch_density = spot_result.get('all_spot_count', 0) / max(tear_area_pixels, 1) * 10000  # 每万像素的斑块数量
+        normalized_texture_density = texture_features['texture_strength'] / max(tear_area_pixels, 1) * 10000  # 每万像素的纹理强度
         
         # 从文件名提取时间点
         frame_num = self.extract_frame_info(image_path)
@@ -102,9 +173,12 @@ class TearDensityAnalyzer:
             'frame_num': frame_num,
             'time_seconds': time_seconds,
             'tear_region_density': tear_region_density,  # 撕裂面区域占整个图像的比例
-            'num_patches': spot_result.get('all_spot_count', 0),  # 撕裂面区域内的斑块数量
-            'spot_density': spot_result.get('all_spot_density', 0.0),  # 撕裂面区域内的斑块密度
-            'normalized_patch_density': normalized_patch_density,  # 归一化斑块密度（每万像素）
+            'texture_strength': texture_features['texture_strength'],  # 综合纹理强度
+            'texture_contrast': texture_features['texture_contrast'],  # GLCM对比度
+            'texture_energy': texture_features['texture_energy'],  # GLCM能量
+            'texture_homogeneity': texture_features['texture_homogeneity'],  # GLCM均匀性
+            'texture_entropy': texture_features['texture_entropy'],  # 纹理熵
+            'normalized_texture_density': normalized_texture_density,  # 归一化纹理密度（每万像素）
             'tear_area_pixels': tear_area_pixels,  # 撕裂面面积（像素）
             'image_shape': image.shape,
             'image_path': image_path
@@ -117,20 +191,20 @@ class TearDensityAnalyzer:
         """对时间序列数据应用平滑滤波"""
         time_seconds = np.array([d['time_seconds'] for d in data])
         tear_region_densities = np.array([d['tear_region_density'] for d in data])
-        num_patches = np.array([d['num_patches'] for d in data])
-        normalized_patch_densities = np.array([d['normalized_patch_density'] for d in data])
+        texture_strengths = np.array([d['texture_strength'] for d in data])
+        normalized_texture_densities = np.array([d['normalized_texture_density'] for d in data])
         
         if smoothing_method == 'gaussian':
             # 高斯滤波
             smoothed_densities = gaussian_filter1d(tear_region_densities, sigma=sigma)
-            smoothed_patches = gaussian_filter1d(num_patches, sigma=sigma)
-            smoothed_normalized = gaussian_filter1d(normalized_patch_densities, sigma=sigma)
+            smoothed_textures = gaussian_filter1d(texture_strengths, sigma=sigma)
+            smoothed_normalized = gaussian_filter1d(normalized_texture_densities, sigma=sigma)
             
         elif smoothing_method == 'moving_avg':
             # 移动平均滤波
             smoothed_densities = np.convolve(tear_region_densities, np.ones(window_size)/window_size, mode='same')
-            smoothed_patches = np.convolve(num_patches, np.ones(window_size)/window_size, mode='same')
-            smoothed_normalized = np.convolve(normalized_patch_densities, np.ones(window_size)/window_size, mode='same')
+            smoothed_textures = np.convolve(texture_strengths, np.ones(window_size)/window_size, mode='same')
+            smoothed_normalized = np.convolve(normalized_texture_densities, np.ones(window_size)/window_size, mode='same')
             
         elif smoothing_method == 'savgol':
             # Savitzky-Golay滤波
@@ -138,16 +212,16 @@ class TearDensityAnalyzer:
             if window_length % 2 == 0:
                 window_length -= 1
             smoothed_densities = signal.savgol_filter(tear_region_densities, window_length, 3)
-            smoothed_patches = signal.savgol_filter(num_patches, window_length, 3)
-            smoothed_normalized = signal.savgol_filter(normalized_patch_densities, window_length, 3)
+            smoothed_textures = signal.savgol_filter(texture_strengths, window_length, 3)
+            smoothed_normalized = signal.savgol_filter(normalized_texture_densities, window_length, 3)
             
         else:
             # 默认使用高斯滤波
             smoothed_densities = gaussian_filter1d(tear_region_densities, sigma=sigma)
-            smoothed_patches = gaussian_filter1d(num_patches, sigma=sigma)
-            smoothed_normalized = gaussian_filter1d(normalized_patch_densities, sigma=sigma)
+            smoothed_textures = gaussian_filter1d(texture_strengths, sigma=sigma)
+            smoothed_normalized = gaussian_filter1d(normalized_texture_densities, sigma=sigma)
         
-        return time_seconds, smoothed_densities, smoothed_patches, smoothed_normalized
+        return time_seconds, smoothed_densities, smoothed_textures, smoothed_normalized
     
     def load_and_enhance_existing_results(self, csv_path):
         """加载现有分析结果并补充归一化字段"""
@@ -164,16 +238,19 @@ class TearDensityAnalyzer:
             total_pixels = 512 * 128  # ROI图像尺寸
             tear_area_pixels = int(row['tear_region_density'] / 100.0 * total_pixels)
             
-            # 计算归一化斑块密度
-            normalized_patch_density = row['num_patches'] / max(tear_area_pixels, 1) * 10000
+            # 计算归一化纹理密度
+            normalized_texture_density = row['texture_strength'] / max(tear_area_pixels, 1) * 10000
             
             result = {
                 'frame_num': int(row['frame_num']),
                 'time_seconds': int(row['time_seconds']),
                 'tear_region_density': row['tear_region_density'],
-                'num_patches': int(row['num_patches']),
-                'spot_density': row['spot_density'],
-                'normalized_patch_density': normalized_patch_density,
+                'texture_strength': row['texture_strength'],
+                'texture_contrast': row['texture_contrast'],
+                'texture_energy': row['texture_energy'],
+                'texture_homogeneity': row['texture_homogeneity'],
+                'texture_entropy': row['texture_entropy'],
+                'normalized_texture_density': normalized_texture_density,
                 'tear_area_pixels': tear_area_pixels,
                 'image_shape': eval(row['image_shape']),
                 'image_path': row['image_path']
@@ -198,7 +275,7 @@ class TearDensityAnalyzer:
     def process_images(self, roi_dir, output_dir, use_contour_method=True):
         """按步骤处理所有图像"""
         
-        print("开始分析撕裂面密度...")
+        print("开始分析撕裂面纹理密度...")
         print("=" * 60)
         
         # 确保输出目录存在
@@ -207,7 +284,7 @@ class TearDensityAnalyzer:
         # 创建各步骤保存目录
         step1_dir = os.path.join(output_dir, 'step1_tear_masks')
         step2_dir = os.path.join(output_dir, 'step2_tear_regions')
-        step3_dir = os.path.join(output_dir, 'step3_patch_analysis')
+        step3_dir = os.path.join(output_dir, 'step3_texture_analysis')
         
         os.makedirs(step1_dir, exist_ok=True)
         os.makedirs(step2_dir, exist_ok=True)
@@ -285,10 +362,10 @@ class TearDensityAnalyzer:
             
             print(f"第一步完成，撕裂面mask已保存到: {step1_dir}")
         
-        skip_step2 = True
+        skip_step2 = False  # 第一次运行，需要生成撕裂面区域和纹理特征
         if not skip_step2:
-            # 第二步：应用撕裂面mask过滤出原图的撕裂面区域，并提取斑块图
-            print("\n第二步：提取撕裂面区域和斑块图...")
+            # 第二步：应用撕裂面mask过滤出原图的撕裂面区域，并计算纹理特征
+            print("\n第二步：提取撕裂面区域和纹理特征...")
             for image_path in tqdm(image_files, desc="提取撕裂面区域", unit="图像"):
                 # 读取图像
                 image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -348,30 +425,32 @@ class TearDensityAnalyzer:
                 region_path = os.path.join(step2_dir, region_filename)
                 cv2.imwrite(region_path, tear_region)
                 
-                # 使用FeatureExtractor检测斑块
-                spot_result = self.feature_extractor.detect_all_white_spots(tear_region)
-                
-                # 保存斑块检测结果图
-                if 'spot_image' in spot_result:
-                    patch_filename = f"tear_patches_frame_{frame_num:06d}.png"
-                    patch_path = os.path.join(step2_dir, patch_filename)
-                    cv2.imwrite(patch_path, spot_result['spot_image'])
-                
-                # 分析撕裂面密度
-                analysis_result = self.analyze_tear_density(image_path, tear_mask)
+                # 分析撕裂面纹理密度
+                analysis_result = self.analyze_tear_texture_density(image_path, tear_mask)
                 if analysis_result:
                     self.results.append(analysis_result)
             
-            print(f"第二步完成，撕裂面区域和斑块图已保存到: {step2_dir}")
+            print(f"第二步完成，撕裂面区域和纹理特征已保存到: {step2_dir}")
         
-        # 第三步：计算斑块数量和密度，生成变化曲线图
-        print("\n第三步：计算斑块数量和密度，生成变化曲线图...")
+        # 第三步：计算纹理密度，生成变化曲线图
+        print("\n第三步：计算纹理密度，生成变化曲线图...")
         
         # 检查是否已有分析结果，如果有则加载并补充归一化字段
-        csv_path = os.path.join(step3_dir, 'tear_density_analysis.csv')
+        csv_path = os.path.join(step3_dir, 'tear_texture_density_analysis.csv')
         if os.path.exists(csv_path) and len(self.results) == 0:
             print("发现现有分析结果，正在加载并补充归一化字段...")
             self.load_and_enhance_existing_results(csv_path)
+        elif len(self.results) == 0:
+            # 尝试从现有的撕裂面mask文件重新计算纹理特征
+            print("尝试从现有撕裂面mask文件重新计算纹理特征...")
+            self.recompute_texture_from_existing_masks(image_files, step1_dir, step2_dir)
+            
+            if len(self.results) == 0:
+                print("警告：无法找到现有的撕裂面mask文件，请先运行撕裂面检测")
+                return
+            
+            # 保存结果
+            self.save_results(step3_dir)
         else:
             # 保存结果
             self.save_results(step3_dir)
@@ -382,8 +461,60 @@ class TearDensityAnalyzer:
         print(f"第三步完成，分析结果和曲线图已保存到: {step3_dir}")
         
         print("=" * 60)
-        print("撕裂面密度分析完成!")
+        print("撕裂面纹理密度分析完成!")
         print(f"所有结果已保存到: {output_dir}")
+    
+    def recompute_texture_from_existing_masks(self, image_files, step1_dir, step2_dir):
+        """从现有的撕裂面mask文件重新计算纹理特征"""
+        
+        # 检查是否有现有的撕裂面mask文件
+        existing_masks = []
+        
+        # 首先尝试从data_tear_density_curve目录查找现有的mask文件
+        existing_tear_masks_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_tear_density_curve/step1_tear_masks"
+        
+        for image_path in image_files:
+            frame_num = self.extract_frame_info(image_path)
+            if frame_num >= 0:
+                # 尝试查找现有的mask文件
+                mask_paths = [
+                    os.path.join(existing_tear_masks_dir, f"tear_mask_after_fill_frame_{frame_num:06d}.png"),
+                    os.path.join(existing_tear_masks_dir, f"tear_mask_contour_frame_{frame_num:06d}.png"),
+                    os.path.join(step1_dir, f"tear_mask_after_fill_frame_{frame_num:06d}.png"),
+                    os.path.join(step1_dir, f"tear_mask_contour_frame_{frame_num:06d}.png"),
+                ]
+                
+                for mask_path in mask_paths:
+                    if os.path.exists(mask_path):
+                        existing_masks.append((image_path, mask_path, frame_num))
+                        break
+        
+        if not existing_masks:
+            print("未找到现有的撕裂面mask文件")
+            return
+        
+        print(f"找到 {len(existing_masks)} 个现有的撕裂面mask文件")
+        
+        # 重新计算纹理特征
+        for image_path, mask_path, frame_num in tqdm(existing_masks, desc="重新计算纹理特征", unit="图像"):
+            try:
+                # 读取图像和mask
+                image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+                tear_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                
+                if image is None or tear_mask is None:
+                    continue
+                
+                # 分析纹理密度
+                analysis_result = self.analyze_tear_texture_density(image_path, tear_mask)
+                if analysis_result:
+                    self.results.append(analysis_result)
+                    
+            except Exception as e:
+                print(f"处理帧 {frame_num} 时出错: {e}")
+                continue
+        
+        print(f"重新计算纹理特征完成，共 {len(self.results)} 条结果")
     
     def save_results(self, output_dir):
         """保存分析结果"""
@@ -393,9 +524,7 @@ class TearDensityAnalyzer:
         for result in self.results:
             json_result = {}
             for key, value in result.items():
-                if key == 'patch_areas':  # 跳过patch_areas列表
-                    continue
-                elif isinstance(value, np.ndarray):
+                if isinstance(value, np.ndarray):
                     json_result[key] = value.tolist()
                 elif hasattr(value, 'item'):  # numpy标量
                     json_result[key] = value.item()
@@ -403,14 +532,14 @@ class TearDensityAnalyzer:
                     json_result[key] = value
             json_results.append(json_result)
         
-        json_path = os.path.join(output_dir, 'tear_density_analysis.json')
+        json_path = os.path.join(output_dir, 'tear_texture_density_analysis.json')
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_results, f, indent=2, ensure_ascii=False)
         
         # 保存CSV结果
         if self.results:
             df = pd.DataFrame(self.results)
-            csv_path = os.path.join(output_dir, 'tear_density_analysis.csv')
+            csv_path = os.path.join(output_dir, 'tear_texture_density_analysis.csv')
             df.to_csv(csv_path, index=False, encoding='utf-8')
             print(f"CSV结果已保存到: {csv_path}")
         
@@ -429,18 +558,17 @@ class TearDensityAnalyzer:
         # 提取数据
         time_seconds = np.array([r['time_seconds'] for r in sorted_results])
         tear_region_densities = np.array([r['tear_region_density'] for r in sorted_results])
-        num_patches = np.array([r['num_patches'] for r in sorted_results])
-        spot_densities = np.array([r['spot_density'] for r in sorted_results])
+        texture_strengths = np.array([r['texture_strength'] for r in sorted_results])
         
         # 设置中文字体
         font_success = setup_chinese_font()
         
         # 应用平滑滤波
-        _, smoothed_region_densities, smoothed_patches, smoothed_normalized = self.apply_smoothing_filters(
+        _, smoothed_region_densities, smoothed_texture, smoothed_normalized = self.apply_smoothing_filters(
             sorted_results, smoothing_method='gaussian', window_size=50, sigma=10.0)
         
-        # 提取归一化数据
-        normalized_patch_densities = np.array([r['normalized_patch_density'] for r in sorted_results])
+        # 提取归一化纹理密度数据
+        normalized_texture_densities = np.array([r['normalized_texture_density'] for r in sorted_results])
         
         # 创建图表
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 15))
@@ -461,34 +589,34 @@ class TearDensityAnalyzer:
                    label=f'平均值: {mean_density:.2f}%')
         ax1.legend()
         
-        # 撕裂面斑块数量随时间变化（原始数据+平滑曲线）
-        ax2.plot(time_seconds, num_patches, 'r-', linewidth=0.8, alpha=0.3, label='原始数据')
-        ax2.plot(time_seconds, smoothed_patches, 'r-', linewidth=2.5, alpha=0.9, label='平滑曲线')
-        ax2.fill_between(time_seconds, smoothed_patches, alpha=0.3, color='red')
+        # 撕裂面纹理强度随时间变化（原始数据+平滑曲线）
+        ax2.plot(time_seconds, texture_strengths, 'r-', linewidth=0.8, alpha=0.3, label='原始数据')
+        ax2.plot(time_seconds, smoothed_texture, 'r-', linewidth=2.5, alpha=0.9, label='平滑曲线')
+        ax2.fill_between(time_seconds, smoothed_texture, alpha=0.3, color='red')
         ax2.set_xlabel('时间 (秒)' if font_success else 'Time (seconds)')
-        ax2.set_ylabel('撕裂面斑块数量' if font_success else 'Tear Patch Count')
-        ax2.set_title('撕裂面斑块数量随时间变化 (平滑滤波)' if font_success else 'Tear Patch Count Over Time (Smoothed)')
+        ax2.set_ylabel('撕裂面纹理强度' if font_success else 'Tear Texture Strength')
+        ax2.set_title('撕裂面纹理强度随时间变化 (平滑滤波)' if font_success else 'Tear Texture Strength Over Time (Smoothed)')
         ax2.grid(True, alpha=0.3)
         ax2.set_xlim(0, max(time_seconds))
         
         # 添加统计信息
-        mean_patches = np.mean(num_patches)
-        ax2.axhline(y=mean_patches, color='blue', linestyle='--', alpha=0.7,
-                   label=f'平均值: {mean_patches:.1f}')
+        mean_texture = np.mean(texture_strengths)
+        ax2.axhline(y=mean_texture, color='blue', linestyle='--', alpha=0.7,
+                   label=f'平均值: {mean_texture:.2f}')
         ax2.legend()
         
-        # 归一化斑块密度随时间变化（原始数据+平滑曲线）
-        ax3.plot(time_seconds, normalized_patch_densities, 'g-', linewidth=0.8, alpha=0.3, label='原始数据')
+        # 归一化纹理密度随时间变化（原始数据+平滑曲线）
+        ax3.plot(time_seconds, normalized_texture_densities, 'g-', linewidth=0.8, alpha=0.3, label='原始数据')
         ax3.plot(time_seconds, smoothed_normalized, 'g-', linewidth=2.5, alpha=0.9, label='平滑曲线')
         ax3.fill_between(time_seconds, smoothed_normalized, alpha=0.3, color='green')
         ax3.set_xlabel('时间 (秒)' if font_success else 'Time (seconds)')
-        ax3.set_ylabel('归一化斑块密度 (每万像素)' if font_success else 'Normalized Patch Density (per 10k pixels)')
-        ax3.set_title('归一化斑块密度随时间变化 (排除撕裂面面积影响)' if font_success else 'Normalized Patch Density Over Time (Area-Independent)')
+        ax3.set_ylabel('归一化纹理密度 (每万像素)' if font_success else 'Normalized Texture Density (per 10k pixels)')
+        ax3.set_title('归一化纹理密度随时间变化 (排除撕裂面面积影响)' if font_success else 'Normalized Texture Density Over Time (Area-Independent)')
         ax3.grid(True, alpha=0.3)
         ax3.set_xlim(0, max(time_seconds))
         
         # 添加统计信息
-        mean_normalized = np.mean(normalized_patch_densities)
+        mean_normalized = np.mean(normalized_texture_densities)
         ax3.axhline(y=mean_normalized, color='orange', linestyle='--', alpha=0.7,
                    label=f'平均值: {mean_normalized:.2f}')
         ax3.legend()
@@ -500,7 +628,7 @@ class TearDensityAnalyzer:
         plt.subplots_adjust(top=0.95)
         
         # 保存图表
-        plot_path = os.path.join(output_dir, 'tear_density_analysis.png')
+        plot_path = os.path.join(output_dir, 'tear_texture_density_analysis.png')
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -515,23 +643,23 @@ class TearDensityAnalyzer:
         # 提取数据
         time_points = [r['time_seconds'] for r in sorted_results]
         tear_densities = [r['tear_region_density'] for r in sorted_results]
-        num_patches = [r['num_patches'] for r in sorted_results]
-        normalized_densities = [r['normalized_patch_density'] for r in sorted_results]
+        texture_strengths = [r['texture_strength'] for r in sorted_results]
+        normalized_densities = [r['normalized_texture_density'] for r in sorted_results]
         
         # 创建综合图
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-        fig.suptitle('Tear Surface Analysis Summary', fontsize=16)
+        fig.suptitle('Tear Texture Analysis Summary', fontsize=16)
         
-        # 密度和斑块数量对比
+        # 密度和纹理强度对比
         ax1_twin = ax1.twinx()
         
-        line1 = ax1.plot(time_points, tear_densities, 'b-o', linewidth=2, markersize=6, label='Density (%)')
-        line2 = ax1_twin.plot(time_points, num_patches, 'r-s', linewidth=2, markersize=6, label='Number of Patches')
+        line1 = ax1.plot(time_points, tear_densities, 'b-o', linewidth=2, markersize=6, label='Tear Density (%)')
+        line2 = ax1_twin.plot(time_points, texture_strengths, 'r-s', linewidth=2, markersize=6, label='Texture Strength')
         
         ax1.set_xlabel('Time Point')
         ax1.set_ylabel('Tear Density (%)', color='b')
-        ax1_twin.set_ylabel('Number of Patches', color='r')
-        ax1.set_title('Tear Density vs Number of Patches')
+        ax1_twin.set_ylabel('Texture Strength', color='r')
+        ax1.set_title('Tear Density vs Texture Strength')
         ax1.grid(True, alpha=0.3)
         
         # 合并图例
@@ -539,18 +667,18 @@ class TearDensityAnalyzer:
         labels = [l.get_label() for l in lines]
         ax1.legend(lines, labels, loc='upper left')
         
-        # 归一化斑块密度
-        ax2.plot(time_points, normalized_densities, 'g-^', linewidth=2, markersize=6, label='Normalized Patch Density')
+        # 归一化纹理密度
+        ax2.plot(time_points, normalized_densities, 'g-^', linewidth=2, markersize=6, label='Normalized Texture Density')
         ax2.set_xlabel('Time Point')
-        ax2.set_ylabel('Normalized Patch Density (per 10k pixels)', color='g')
-        ax2.set_title('Normalized Patch Density Over Time (Area-Independent)')
+        ax2.set_ylabel('Normalized Texture Density (per 10k pixels)', color='g')
+        ax2.set_title('Normalized Texture Density Over Time (Area-Independent)')
         ax2.grid(True, alpha=0.3)
         ax2.legend()
         
         plt.tight_layout()
         
         # 保存综合图
-        summary_path = os.path.join(output_dir, 'tear_density_summary.png')
+        summary_path = os.path.join(output_dir, 'tear_texture_density_summary.png')
         plt.savefig(summary_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -562,7 +690,7 @@ def main():
     
     # 设置路径
     roi_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs"
-    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_tear_density_curve"
+    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_texture_density_curve"
     
     if len(sys.argv) > 1:
         roi_dir = sys.argv[1]
@@ -571,7 +699,7 @@ def main():
         output_dir = sys.argv[2]
 
     # 创建分析器
-    analyzer = TearDensityAnalyzer()
+    analyzer = TearTextureDensityAnalyzer()
     
     # 处理图像（默认使用新方法）
     analyzer.process_images(roi_dir, output_dir, use_contour_method=True)

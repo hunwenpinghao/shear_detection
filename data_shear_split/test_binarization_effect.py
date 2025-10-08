@@ -230,9 +230,43 @@ def test_binarization_effects(image_path, output_path):
         axes[2, 2].set_title('Final Mask 过滤后的纹理图(灰度)')
         axes[2, 2].axis('off')
 
-    # 说明占位
-    axes[2, 3].text(0.5, 0.5, 'Final Filled Mask 过滤结果', ha='center', va='center', transform=axes[2, 3].transAxes)
-    axes[2, 3].axis('off')
+    # 显示去掉黑色纹理后的LBP纹理图（只保留橙色/红色/黄色/白色部分）
+    try:
+        # 使用与axes[2,2]相同的LBP纹理数据，确保颜色一致
+        lbp_processor = LBPTextureProcessor(radius=3, n_points=24)
+        lbp_texture, _ = lbp_processor.compute_lbp_texture(image)
+        
+        # 应用Final Mask
+        lbp_masked = lbp_texture.copy()
+        lbp_masked[filled_mask == 0] = 0
+        
+        # 去掉黑色纹理：将LBP值为0的像素设为NaN，这样在显示时会被忽略
+        lbp_no_black = lbp_masked.copy()
+        lbp_no_black[lbp_no_black == 0] = np.nan
+        
+        # 使用与axes[2,2]完全相同的颜色映射范围，确保颜色完全一致
+        # 直接使用axes[2,2]的vmin和vmax值
+        vmin = 0
+        vmax = np.max(lbp_texture) if np.max(lbp_texture) > 0 else 255
+        
+        im = axes[2, 3].imshow(lbp_no_black, cmap='hot', vmin=vmin, vmax=vmax)
+        axes[2, 3].set_title('去掉黑色纹理后的\nFinal Mask 过滤LBP纹理图')
+        axes[2, 3].axis('off')
+    except Exception as e:
+        # 回退显示：被掩膜的原始灰度图，去掉黑色像素，但仍使用hot颜色映射
+        img_masked = image.copy()
+        img_masked[filled_mask == 0] = 0
+        # 将黑色像素设为NaN
+        img_no_black = img_masked.astype(np.float64)
+        img_no_black[img_no_black == 0] = np.nan
+        
+        # 使用与原图相同的颜色映射范围
+        vmin = 0
+        vmax = 255
+        
+        axes[2, 3].imshow(img_no_black, cmap='hot', vmin=vmin, vmax=vmax)
+        axes[2, 3].set_title('去掉黑色纹理后的\nFinal Mask 过滤纹理图')
+        axes[2, 3].axis('off')
     
     # 添加统计信息
     stats_text = f"""Binarization Statistics:

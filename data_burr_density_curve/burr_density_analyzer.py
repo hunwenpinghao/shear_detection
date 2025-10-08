@@ -147,13 +147,14 @@ class BurrDensityAnalyzer:
         tear_pixels = np.sum(tear_mask > 0)
         tear_region_density = (tear_pixels / total_pixels) * 100
         
-        # 计算撕裂面区域内的毛刺统计
-        burr_pixels = np.sum(tear_burr_mask > 0)
-        burr_density_in_tear = (burr_pixels / tear_pixels * 100) if tear_pixels > 0 else 0
-        
         # 计算毛刺数量（连通域分析）
         num_labels, labels = cv2.connectedComponents(tear_burr_mask)
         num_burrs = num_labels - 1  # 减去背景标签
+        
+        # 计算撕裂面区域内的毛刺统计
+        burr_pixels = np.sum(tear_burr_mask > 0)
+        # 修改密度定义：Density = num_burrs / 撕裂面区域内所有毛刺区域内的所有pixel的数量
+        burr_density_in_tear = (num_burrs / burr_pixels) if burr_pixels > 0 else 0
         
         # 从文件名提取时间点
         frame_num = self.extract_frame_info(image_path)
@@ -164,7 +165,7 @@ class BurrDensityAnalyzer:
             'time_seconds': time_seconds,
             'tear_region_density': tear_region_density,  # 撕裂面区域占整个图像的比例
             'num_burrs': num_burrs,  # 撕裂面区域内的毛刺数量
-            'burr_density': burr_density_in_tear,  # 撕裂面区域内的毛刺密度
+            'burr_density': burr_density_in_tear,  # 毛刺数量密度：num_burrs / burr_pixels
             'burr_total_area': burr_pixels,  # 毛刺总面积
             'image_shape': image.shape,
             'image_path': image_path
@@ -178,16 +179,19 @@ class BurrDensityAnalyzer:
         time_seconds = np.array([d['time_seconds'] for d in data])
         burr_region_densities = np.array([d['burr_density'] for d in data])
         num_burrs = np.array([d['num_burrs'] for d in data])
+        tear_region_densities = np.array([d['tear_region_density'] for d in data])
         
         if smoothing_method == 'gaussian':
             # 高斯滤波
             smoothed_densities = gaussian_filter1d(burr_region_densities, sigma=sigma)
             smoothed_burrs = gaussian_filter1d(num_burrs, sigma=sigma)
+            smoothed_tear_densities = gaussian_filter1d(tear_region_densities, sigma=sigma)
             
         elif smoothing_method == 'moving_avg':
             # 移动平均滤波
             smoothed_densities = np.convolve(burr_region_densities, np.ones(window_size)/window_size, mode='same')
             smoothed_burrs = np.convolve(num_burrs, np.ones(window_size)/window_size, mode='same')
+            smoothed_tear_densities = np.convolve(tear_region_densities, np.ones(window_size)/window_size, mode='same')
             
         elif smoothing_method == 'savgol':
             # Savitzky-Golay滤波
@@ -196,13 +200,15 @@ class BurrDensityAnalyzer:
                 window_length -= 1
             smoothed_densities = signal.savgol_filter(burr_region_densities, window_length, 3)
             smoothed_burrs = signal.savgol_filter(num_burrs, window_length, 3)
+            smoothed_tear_densities = signal.savgol_filter(tear_region_densities, window_length, 3)
             
         else:
             # 默认使用高斯滤波
             smoothed_densities = gaussian_filter1d(burr_region_densities, sigma=sigma)
             smoothed_burrs = gaussian_filter1d(num_burrs, sigma=sigma)
+            smoothed_tear_densities = gaussian_filter1d(tear_region_densities, sigma=sigma)
         
-        return time_seconds, smoothed_densities, smoothed_burrs
+        return time_seconds, smoothed_densities, smoothed_burrs, smoothed_tear_densities
     
     def extract_frame_info(self, filename: str) -> int:
         """从文件名提取帧号"""
@@ -251,79 +257,83 @@ class BurrDensityAnalyzer:
         use_contour_method = True
         detector = ShearTearDetector(use_contour_method=use_contour_method)
         
-        # 第一步：生成撕裂面mask（before fill + after fill）
-        print("\n第一步：生成撕裂面mask...")
-        for image_path in tqdm(image_files, desc="生成撕裂面mask", unit="图像"):
-            # 读取图像
-            image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-            if image is None:
-                continue
-                
-            # 检测撕裂面
-            result = detector.detect_surfaces(image, visualize=False)
-            if result and 'segmented_image' in result:
-                frame_num = self.extract_frame_info(image_path)
-                
-                # 根据使用的方法保存不同的mask
-                if use_contour_method:
-                    # 新方法：使用等高线方法的结果
-                    if 'tear_mask' in result.get('intermediate_results', {}):
-                        tear_mask = result['intermediate_results']['tear_mask']
-                        # 保存等高线方法生成的撕裂面mask
-                        contour_mask = tear_mask.astype(np.uint8) * 255
-                        contour_filename = f"tear_mask_contour_frame_{frame_num:06d}.png"
-                        contour_path = os.path.join(step1_dir, contour_filename)
-                        cv2.imwrite(contour_path, contour_mask)
+        skip_step1 = True
+        if not skip_step1:
+            # 第一步：生成撕裂面mask（before fill + after fill）
+            print("\n第一步：生成撕裂面mask...")
+            for image_path in tqdm(image_files, desc="生成撕裂面mask", unit="图像"):
+                # 读取图像
+                image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+                if image is None:
+                    continue
+                    
+                # 检测撕裂面
+                result = detector.detect_surfaces(image, visualize=False)
+                if result and 'segmented_image' in result:
+                    frame_num = self.extract_frame_info(image_path)
+                    
+                    # 根据使用的方法保存不同的mask
+                    if use_contour_method:
+                        # 新方法：使用等高线方法的结果
+                        if 'tear_mask' in result.get('intermediate_results', {}):
+                            tear_mask = result['intermediate_results']['tear_mask']
+                            # 保存等高线方法生成的撕裂面mask
+                            contour_mask = tear_mask.astype(np.uint8) * 255
+                            contour_filename = f"tear_mask_contour_frame_{frame_num:06d}.png"
+                            contour_path = os.path.join(step1_dir, contour_filename)
+                            cv2.imwrite(contour_path, contour_mask)
+                            
+                            # 同时保存分割结果
+                            segmented_image = result['segmented_image']
+                            after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
+                            after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
+                            after_fill_path = os.path.join(step1_dir, after_fill_filename)
+                            cv2.imwrite(after_fill_path, after_fill_mask)
+                    else:
+                        # 老方法：保存before fill和after fill mask
+                        if 'tear_mask_original' in result:
+                            before_fill_mask = result['tear_mask_original'].astype(np.uint8) * 255
+                            before_fill_filename = f"tear_mask_before_fill_frame_{frame_num:06d}.png"
+                            before_fill_path = os.path.join(step1_dir, before_fill_filename)
+                            cv2.imwrite(before_fill_path, before_fill_mask)
                         
-                        # 同时保存分割结果
+                        # 保存after fill mask
                         segmented_image = result['segmented_image']
                         after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
                         after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
                         after_fill_path = os.path.join(step1_dir, after_fill_filename)
                         cv2.imwrite(after_fill_path, after_fill_mask)
-                else:
-                    # 老方法：保存before fill和after fill mask
-                    if 'tear_mask_original' in result:
-                        before_fill_mask = result['tear_mask_original'].astype(np.uint8) * 255
-                        before_fill_filename = f"tear_mask_before_fill_frame_{frame_num:06d}.png"
-                        before_fill_path = os.path.join(step1_dir, before_fill_filename)
-                        cv2.imwrite(before_fill_path, before_fill_mask)
+            
+            print(f"第一步完成，撕裂面mask已保存到: {step1_dir}")
+        
+        skip_step2 = True
+        if not skip_step2:
+            # 第二步：基于原始图片生成毛刺图
+            print("\n第二步：基于原始图片生成毛刺图...")
+            for image_path in tqdm(image_files, desc="生成原始毛刺图", unit="图像"):
+                # 读取图像
+                image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+                if image is None:
+                    continue
                     
-                    # 保存after fill mask
-                    segmented_image = result['segmented_image']
-                    after_fill_mask = (segmented_image == 128).astype(np.uint8) * 255
-                    after_fill_filename = f"tear_mask_after_fill_frame_{frame_num:06d}.png"
-                    after_fill_path = os.path.join(step1_dir, after_fill_filename)
-                    cv2.imwrite(after_fill_path, after_fill_mask)
-        
-        print(f"第一步完成，撕裂面mask已保存到: {step1_dir}")
-        
-        # 第二步：基于原始图片生成毛刺图
-        print("\n第二步：基于原始图片生成毛刺图...")
-        for image_path in tqdm(image_files, desc="生成原始毛刺图", unit="图像"):
-            # 读取图像
-            image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-            if image is None:
-                continue
+                frame_num = self.extract_frame_info(image_path)
                 
-            frame_num = self.extract_frame_info(image_path)
-            
-            # 基于原始图片检测毛刺
-            burr_result = self.feature_extractor.detect_burs(image, mask=None)
-            
-            # 保存原始毛刺图（可视化版本）
-            if 'burs_binary_mask' in burr_result and burr_result['burs_binary_mask'] is not None:
-                burr_binary = burr_result['burs_binary_mask']
-                
-                # 生成毛刺可视化图像
-                burr_visualization = self.create_burr_visualization(image, burr_binary)
+                # 基于原始图片检测毛刺
+                burr_result = self.feature_extractor.detect_burs(image, mask=None)
                 
                 # 保存原始毛刺图（可视化版本）
-                original_burr_filename = f"original_burrs_frame_{frame_num:06d}.png"
-                original_burr_path = os.path.join(step2_dir, original_burr_filename)
-                cv2.imwrite(original_burr_path, burr_visualization)
-        
-        print(f"第二步完成，原始毛刺图已保存到: {step2_dir}")
+                if 'burs_binary_mask' in burr_result and burr_result['burs_binary_mask'] is not None:
+                    burr_binary = burr_result['burs_binary_mask']
+                    
+                    # 生成毛刺可视化图像
+                    burr_visualization = self.create_burr_visualization(image, burr_binary)
+                    
+                    # 保存原始毛刺图（可视化版本）
+                    original_burr_filename = f"original_burrs_frame_{frame_num:06d}.png"
+                    original_burr_path = os.path.join(step2_dir, original_burr_filename)
+                    cv2.imwrite(original_burr_path, burr_visualization)
+            
+            print(f"第二步完成，原始毛刺图已保存到: {step2_dir}")
         
         # 第三步：根据撕裂面mask抠出撕裂面区域的毛刺图
         print("\n第三步：根据撕裂面mask抠出撕裂面区域的毛刺图...")
@@ -347,12 +357,12 @@ class BurrDensityAnalyzer:
                 
                 # 保存撕裂面区域
                 region_filename = f"tear_region_frame_{frame_num:06d}.png"
-                region_path = os.path.join(step2_dir, region_filename)
+                region_path = os.path.join(step3_dir, region_filename)
                 cv2.imwrite(region_path, tear_region)
                 
                 # 读取原始毛刺图
                 original_burr_filename = f"original_burrs_frame_{frame_num:06d}.png"
-                original_burr_path = os.path.join(step2_dir, original_burr_filename)
+                original_burr_path = os.path.join(step3_dir, original_burr_filename)
                 
                 if os.path.exists(original_burr_path):
                     # 重新检测毛刺以获得二值掩码
@@ -369,7 +379,7 @@ class BurrDensityAnalyzer:
                         
                         # 保存撕裂面区域的毛刺图（可视化版本）
                         tear_burr_filename = f"tear_burrs_frame_{frame_num:06d}.png"
-                        tear_burr_path = os.path.join(step2_dir, tear_burr_filename)
+                        tear_burr_path = os.path.join(step3_dir, tear_burr_filename)
                         cv2.imwrite(tear_burr_path, tear_burr_visualization)
                         
                         # 分析撕裂面毛刺密度（使用二值掩码）
@@ -377,7 +387,7 @@ class BurrDensityAnalyzer:
                         if analysis_result:
                             self.results.append(analysis_result)
         
-        print(f"第三步完成，撕裂面毛刺图已保存到: {step2_dir}")
+        print(f"第三步完成，撕裂面毛刺图已保存到: {step3_dir}")
         
         # 第四步：计算撕裂面毛刺数量和密度，生成变化曲线图
         print("\n第四步：计算撕裂面毛刺数量和密度，生成变化曲线图...")
@@ -483,13 +493,15 @@ class BurrDensityAnalyzer:
             json.dump(json_results, f, indent=2, ensure_ascii=False)
         
         # 保存CSV结果
+        csv_path = None
         if self.results:
             df = pd.DataFrame(self.results)
             csv_path = os.path.join(output_dir, 'burr_density_analysis.csv')
             df.to_csv(csv_path, index=False, encoding='utf-8')
         
         print(f"分析结果已保存到: {json_path}")
-        print(f"CSV结果已保存到: {csv_path}")
+        if csv_path:
+            print(f"CSV结果已保存到: {csv_path}")
     
     def create_visualizations(self, output_dir):
         """创建可视化图表"""
@@ -511,26 +523,26 @@ class BurrDensityAnalyzer:
         font_success = setup_chinese_font()
         
         # 应用平滑滤波
-        _, smoothed_burr_densities, smoothed_burrs = self.apply_smoothing_filters(
+        _, smoothed_burr_densities, smoothed_burrs, smoothed_tear_densities = self.apply_smoothing_filters(
             sorted_results, smoothing_method='gaussian', window_size=50, sigma=10.0)
         
         # 创建图表
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 15))
         
         # 撕裂面毛刺密度随时间变化（原始数据+平滑曲线）
         ax1.plot(time_seconds, burr_densities, 'b-', linewidth=0.8, alpha=0.3, label='Raw Data')
         ax1.plot(time_seconds, smoothed_burr_densities, 'b-', linewidth=2.5, alpha=0.9, label='Smoothed Curve')
         ax1.fill_between(time_seconds, smoothed_burr_densities, alpha=0.3, color='blue')
         ax1.set_xlabel('Time (seconds)')
-        ax1.set_ylabel('Tear Region Burr Density (%)')
-        ax1.set_title('Tear Region Burr Density Over Time (Smoothed)')
+        ax1.set_ylabel('Burr Count Density (burrs/pixel)')
+        ax1.set_title('Burr Count Density Over Time (Smoothed)')
         ax1.grid(True, alpha=0.3)
         ax1.set_xlim(0, max(time_seconds))
         
         # 添加统计信息
         mean_density = np.mean(burr_densities)
         ax1.axhline(y=mean_density, color='red', linestyle='--', alpha=0.7, 
-                   label=f'Mean: {mean_density:.2f}%')
+                   label=f'Mean: {mean_density:.4f}')
         ax1.legend()
         
         # 撕裂面毛刺数量随时间变化（原始数据+平滑曲线）
@@ -548,6 +560,22 @@ class BurrDensityAnalyzer:
         ax2.axhline(y=mean_burrs, color='blue', linestyle='--', alpha=0.7,
                    label=f'Mean: {mean_burrs:.1f}')
         ax2.legend()
+        
+        # 撕裂面区域密度随时间变化（原始数据+平滑曲线）
+        ax3.plot(time_seconds, tear_region_densities, 'g-', linewidth=0.8, alpha=0.3, label='Raw Data')
+        ax3.plot(time_seconds, smoothed_tear_densities, 'g-', linewidth=2.5, alpha=0.9, label='Smoothed Curve')
+        ax3.fill_between(time_seconds, smoothed_tear_densities, alpha=0.3, color='green')
+        ax3.set_xlabel('Time (seconds)')
+        ax3.set_ylabel('Tear Region Density (%)')
+        ax3.set_title('Tear Region Density Over Time (Smoothed)')
+        ax3.grid(True, alpha=0.3)
+        ax3.set_xlim(0, max(time_seconds))
+        
+        # 添加统计信息
+        mean_tear_density = np.mean(tear_region_densities)
+        ax3.axhline(y=mean_tear_density, color='red', linestyle='--', alpha=0.7,
+                   label=f'Mean: {mean_tear_density:.2f}%')
+        ax3.legend()
         
         # 添加滤波方法说明
         fig.suptitle('Smoothing Method: Gaussian Filter (σ=10, window=50)', fontsize=12, y=0.98)
@@ -597,9 +625,9 @@ class BurrDensityAnalyzer:
         # 毛刺密度分布
         burr_densities = [r['burr_density'] for r in sorted_results]
         ax2.hist(burr_densities, bins=20, alpha=0.7, color='green', edgecolor='black')
-        ax2.set_xlabel('Burr Density in Tear Region (%)')
+        ax2.set_xlabel('Burr Count Density (burrs/pixel)')
         ax2.set_ylabel('Frequency')
-        ax2.set_title('Distribution of Burr Densities in Tear Region')
+        ax2.set_title('Distribution of Burr Count Densities in Tear Region')
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
