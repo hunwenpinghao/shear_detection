@@ -501,6 +501,267 @@ class GeometryFeatureExtractor:
             'spectral_centroid': spectral_centroid
         }
     
+    def compute_white_patch_features(self, image: np.ndarray, mask: np.ndarray) -> Dict[str, float]:
+        """
+        计算撕裂面白色斑块特征（4种检测方法 × 4种量化指标）
+        
+        针对用户观察：随着剪刀磨损，撕裂面白色斑块逐渐增多
+        
+        Args:
+            image: 输入灰度图像
+            mask: ROI掩码（撕裂面）
+            
+        Returns:
+            包含所有白斑特征的字典（16个特征）
+        """
+        if mask is None or not mask.any():
+            return self._get_empty_white_patch_features()
+        
+        try:
+            # 提取掩码区域
+            masked_region = cv2.bitwise_and(image, image, mask=mask)
+            
+            # === 方法1：固定阈值法 ===
+            method1_results = self._detect_white_patches_fixed_threshold(masked_region, mask)
+            
+            # === 方法2：自适应阈值法（Otsu） ===
+            method2_results = self._detect_white_patches_adaptive(masked_region, mask)
+            
+            # === 方法3：相对亮度法（统计阈值） ===
+            method3_results = self._detect_white_patches_relative(masked_region, mask)
+            
+            # === 方法4：局部对比度法（形态学Top-Hat） ===
+            method4_results = self._detect_white_patches_tophat(masked_region, mask)
+            
+            # 合并所有结果
+            features = {}
+            for i, results in enumerate([method1_results, method2_results, method3_results, method4_results], 1):
+                features[f'white_area_ratio_m{i}'] = results['area_ratio']
+                features[f'white_patch_count_m{i}'] = results['patch_count']
+                features[f'white_avg_brightness_m{i}'] = results['avg_brightness']
+                features[f'white_brightness_std_m{i}'] = results['brightness_std']
+                features[f'white_avg_patch_area_m{i}'] = results['avg_patch_area']
+                features[f'white_composite_index_m{i}'] = results['composite_index']
+                features[f'white_brightness_entropy_m{i}'] = results['brightness_entropy']
+                features[f'white_patch_area_entropy_m{i}'] = results['patch_area_entropy']
+            
+        except Exception as e:
+            features = self._get_empty_white_patch_features()
+        
+        return features
+    
+    def _detect_white_patches_fixed_threshold(self, masked_region: np.ndarray, mask: np.ndarray, 
+                                              threshold: int = 200) -> Dict[str, float]:
+        """方法1：固定阈值法"""
+        # 二值化
+        _, binary = cv2.threshold(masked_region, threshold, 255, cv2.THRESH_BINARY)
+        binary = cv2.bitwise_and(binary, binary, mask=mask)
+        
+        # 计算指标
+        return self._compute_patch_metrics(binary, masked_region, mask)
+    
+    def _detect_white_patches_adaptive(self, masked_region: np.ndarray, mask: np.ndarray, 
+                                       min_threshold: int = 170) -> Dict[str, float]:
+        """方法2：自适应阈值法（Otsu + 最小阈值约束）"""
+        # 只在掩码区域计算Otsu阈值
+        masked_pixels = masked_region[mask > 0]
+        if len(masked_pixels) == 0:
+            return {'area_ratio': 0.0, 'patch_count': 0, 'avg_brightness': 0.0, 'brightness_std': 0.0}
+        
+        # Otsu阈值
+        otsu_threshold, _ = cv2.threshold(masked_pixels, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # 使用Otsu和最小阈值的较大值，避免阈值过低
+        threshold = max(otsu_threshold, min_threshold)
+        
+        # 应用阈值
+        _, binary = cv2.threshold(masked_region, threshold, 255, cv2.THRESH_BINARY)
+        binary = cv2.bitwise_and(binary, binary, mask=mask)
+        
+        return self._compute_patch_metrics(binary, masked_region, mask)
+    
+    def _detect_white_patches_relative(self, masked_region: np.ndarray, mask: np.ndarray, 
+                                       sigma_factor: float = 1.5) -> Dict[str, float]:
+        """方法3：相对亮度法（统计阈值）"""
+        # 计算掩码区域的统计量
+        masked_pixels = masked_region[mask > 0]
+        if len(masked_pixels) == 0:
+            return {'area_ratio': 0.0, 'patch_count': 0, 'avg_brightness': 0.0, 'brightness_std': 0.0}
+        
+        mean_val = np.mean(masked_pixels)
+        std_val = np.std(masked_pixels)
+        
+        # 阈值 = 均值 + sigma_factor × 标准差
+        threshold = mean_val + sigma_factor * std_val
+        
+        # 应用阈值
+        _, binary = cv2.threshold(masked_region, threshold, 255, cv2.THRESH_BINARY)
+        binary = cv2.bitwise_and(binary, binary, mask=mask)
+        
+        return self._compute_patch_metrics(binary, masked_region, mask)
+    
+    def _detect_white_patches_tophat(self, masked_region: np.ndarray, mask: np.ndarray, 
+                                     kernel_size: int = 15) -> Dict[str, float]:
+        """方法4：局部对比度法（形态学Top-Hat）"""
+        # 形态学开运算（去除小的亮斑，保留背景）
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        tophat = cv2.morphologyEx(masked_region, cv2.MORPH_TOPHAT, kernel)
+        
+        # 对Top-Hat结果进行Otsu阈值化
+        tophat_masked = tophat[mask > 0]
+        if len(tophat_masked) == 0 or tophat_masked.max() == 0:
+            return {'area_ratio': 0.0, 'patch_count': 0, 'avg_brightness': 0.0, 'brightness_std': 0.0}
+        
+        threshold, _ = cv2.threshold(tophat_masked, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # 应用阈值
+        _, binary = cv2.threshold(tophat, max(threshold, 1), 255, cv2.THRESH_BINARY)
+        binary = cv2.bitwise_and(binary, binary, mask=mask)
+        
+        return self._compute_patch_metrics(binary, masked_region, mask)
+    
+    def _compute_patch_metrics(self, binary: np.ndarray, original: np.ndarray, 
+                               mask: np.ndarray) -> Dict[str, float]:
+        """计算白斑的6个量化指标"""
+        # a) 面积占比
+        total_area = np.sum(mask > 0)
+        white_area = np.sum(binary > 0)
+        area_ratio = float(white_area / total_area * 100) if total_area > 0 else 0.0
+        
+        # b) 斑块数量（连通域）
+        num_labels, labels = cv2.connectedComponents(binary)
+        patch_count = num_labels - 1  # 减去背景
+        
+        # c) 亮度统计（只统计白斑区域）
+        white_pixels = original[binary > 0]
+        if len(white_pixels) > 0:
+            avg_brightness = float(np.mean(white_pixels))
+            brightness_std = float(np.std(white_pixels))
+        else:
+            avg_brightness = 0.0
+            brightness_std = 0.0
+        
+        # d) 单个白斑平均面积
+        avg_patch_area = float(area_ratio / patch_count) if patch_count > 0 else 0.0
+        
+        # e) 综合指标：白斑数量+亮度标准差（归一化组合）
+        # 直接相加原始值（未归一化版本，便于跨帧比较）
+        composite_index = float(patch_count + brightness_std)
+        
+        # f) 亮度直方图熵
+        # 反映白斑亮度分布的复杂度和不均匀性
+        brightness_entropy = self._compute_brightness_entropy(white_pixels)
+        
+        # g) 斑块面积分布熵（新增）
+        # 反映白斑大小分布的均匀性
+        patch_area_entropy = self._compute_patch_area_entropy(binary)
+        
+        return {
+            'area_ratio': area_ratio,
+            'patch_count': patch_count,
+            'avg_brightness': avg_brightness,
+            'brightness_std': brightness_std,
+            'avg_patch_area': avg_patch_area,
+            'composite_index': composite_index,
+            'brightness_entropy': brightness_entropy,
+            'patch_area_entropy': patch_area_entropy
+        }
+    
+    def _compute_brightness_entropy(self, pixels: np.ndarray, bins: int = 32) -> float:
+        """
+        计算亮度直方图的香农熵
+        
+        熵值越高，亮度分布越复杂、越不均匀
+        熵值越低，亮度分布越集中、越一致
+        
+        Args:
+            pixels: 像素值数组
+            bins: 直方图的bin数量
+            
+        Returns:
+            熵值
+        """
+        if len(pixels) == 0:
+            return 0.0
+        
+        try:
+            # 计算归一化直方图
+            hist, _ = np.histogram(pixels, bins=bins, range=(0, 256))
+            
+            # 归一化为概率分布
+            hist_norm = hist / (np.sum(hist) + 1e-10)
+            
+            # 计算香农熵: H = -Σ p(i) * log2(p(i))
+            # 过滤掉0值避免log(0)
+            hist_norm = hist_norm[hist_norm > 0]
+            
+            entropy = float(-np.sum(hist_norm * np.log2(hist_norm)))
+            
+        except Exception as e:
+            entropy = 0.0
+        
+        return entropy
+    
+    def _compute_patch_area_entropy(self, binary: np.ndarray, bins: int = 20) -> float:
+        """
+        计算白斑面积分布的香农熵
+        
+        熵值越高，白斑大小分布越不均匀（有大有小）
+        熵值越低，白斑大小分布越一致
+        
+        Args:
+            binary: 二值图像（白斑区域）
+            bins: 直方图的bin数量
+            
+        Returns:
+            熵值
+        """
+        try:
+            # 获取所有连通域的统计信息
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+            
+            if num_labels <= 1:  # 只有背景或没有白斑
+                return 0.0
+            
+            # 提取每个白斑的面积（排除背景）
+            areas = stats[1:, cv2.CC_STAT_AREA]
+            
+            if len(areas) == 0:
+                return 0.0
+            
+            # 计算面积直方图
+            if areas.max() > areas.min():
+                hist, _ = np.histogram(areas, bins=bins)
+            else:
+                # 所有白斑面积相同
+                return 0.0
+            
+            # 归一化为概率分布
+            hist_norm = hist / (np.sum(hist) + 1e-10)
+            
+            # 计算香农熵
+            hist_norm = hist_norm[hist_norm > 0]
+            entropy = float(-np.sum(hist_norm * np.log2(hist_norm)))
+            
+        except Exception as e:
+            entropy = 0.0
+        
+        return entropy
+    
+    def _get_empty_white_patch_features(self) -> Dict[str, float]:
+        """返回空的白斑特征字典"""
+        features = {}
+        for i in range(1, 5):
+            features[f'white_area_ratio_m{i}'] = 0.0
+            features[f'white_patch_count_m{i}'] = 0
+            features[f'white_avg_brightness_m{i}'] = 0.0
+            features[f'white_brightness_std_m{i}'] = 0.0
+            features[f'white_avg_patch_area_m{i}'] = 0.0
+            features[f'white_composite_index_m{i}'] = 0.0
+            features[f'white_brightness_entropy_m{i}'] = 0.0
+            features[f'white_patch_area_entropy_m{i}'] = 0.0
+        return features
+    
     def extract_features(self, preprocessed_data: dict) -> Dict[str, float]:
         """
         提取所有几何特征
@@ -564,6 +825,9 @@ class GeometryFeatureExtractor:
         # 10. 频域特征（左右分别计算）
         left_freq = self.compute_frequency_features(left_edges)
         right_freq = self.compute_frequency_features(right_edges)
+        
+        # 11. 白色斑块特征（仅针对左侧撕裂面）
+        white_patch_features = self.compute_white_patch_features(image, left_mask)
         
         # 组合特征
         features = {
@@ -645,6 +909,9 @@ class GeometryFeatureExtractor:
             'left_spectral_centroid': left_freq['spectral_centroid'],
             'right_spectral_centroid': right_freq['spectral_centroid'],
             'avg_spectral_centroid': (left_freq['spectral_centroid'] + right_freq['spectral_centroid']) / 2,
+            
+            # === 白色斑块特征（撕裂面） ===
+            **white_patch_features,  # 解包16个白斑特征
         }
         
         return features
@@ -707,5 +974,7 @@ class GeometryFeatureExtractor:
             'left_spectral_centroid': 0.0,
             'right_spectral_centroid': 0.0,
             'avg_spectral_centroid': 0.0,
+            # 白斑特征
+            **self._get_empty_white_patch_features(),
         }
 
