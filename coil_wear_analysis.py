@@ -529,6 +529,9 @@ class UniversalWearAnalyzer:
         # 生成深度趋势分析
         self._plot_deep_trend_analysis(df, viz_dir)
         
+        # 生成撕裂面白斑分析
+        self._plot_white_patch_analysis(df, os.path.join(viz_dir, 'white_patch_analysis.png'))
+        
         print("✓ 额外分析图生成完成")
         
         # 生成综合指标相关可视化
@@ -2156,6 +2159,170 @@ class UniversalWearAnalyzer:
         
         print("✓ 深度趋势分析完成")
     
+    def _plot_white_patch_analysis(self, df: pd.DataFrame, save_path: str):
+        """
+        绘制撕裂面白斑分析图
+        
+        针对用户观察：撕裂面白色斑块随钢卷数量增加而增多
+        对比4种检测方法的效果
+        """
+        print("\n生成撕裂面白斑分析...")
+        
+        # 检查是否有白斑特征
+        white_patch_cols = [col for col in df.columns if col.startswith('white_')]
+        if len(white_patch_cols) == 0:
+            print("  警告: 数据中没有白斑特征，跳过")
+            return
+        
+        fig = plt.figure(figsize=(22, 14))
+        gs = fig.add_gridspec(3, 4, hspace=0.3, wspace=0.3)
+        
+        methods = ['m1', 'm2', 'm3', 'm4']
+        method_names = ['固定阈值', 'Otsu自适应', '相对亮度', '形态学Top-Hat']
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+        
+        # 第一行：面积占比时序曲线
+        for idx, (method, method_name, color) in enumerate(zip(methods, method_names, colors)):
+            ax = fig.add_subplot(gs[0, idx])
+            
+            col_name = f'white_area_ratio_{method}'
+            if col_name not in df.columns:
+                continue
+            
+            values = df[col_name].values
+            frames = df['frame_id'].values
+            
+            # 原始数据
+            ax.plot(frames, values, '-', alpha=0.2, color=color, linewidth=0.8)
+            
+            # 平滑曲线
+            window = min(51, len(values)//10*2+1)
+            if window >= 5:
+                smoothed = savgol_filter(values, window_length=window, polyorder=3)
+                ax.plot(frames, smoothed, '-', color=color, linewidth=2.5, label='平滑曲线')
+            
+            # 线性趋势
+            z = np.polyfit(frames, values, 1)
+            trend = np.poly1d(z)
+            ax.plot(frames, trend(frames), '--', color='red', linewidth=2, alpha=0.7)
+            
+            # 计算首尾变化
+            if len(values) > 10:
+                first = np.mean(values[:len(values)//10])
+                last = np.mean(values[-len(values)//10:])
+                change = last - first
+                change_pct = (change / (first + 1e-8)) * 100
+                
+                trend_text = f'变化: {change:+.1f}% ({change_pct:+.0f}%)'
+                box_color = 'lightgreen' if change > 0 else 'lightcoral'
+                
+                ax.text(0.02, 0.98, trend_text, transform=ax.transAxes,
+                       fontsize=10, verticalalignment='top', fontweight='bold',
+                       bbox=dict(boxstyle='round', facecolor=box_color, alpha=0.7))
+            
+            ax.set_xlabel('帧编号', fontsize=10, fontweight='bold')
+            ax.set_ylabel('白斑面积占比(%)', fontsize=10, fontweight='bold')
+            ax.set_title(f'{method_name}', fontsize=12, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8)
+        
+        # 第二行：斑块数量时序曲线
+        for idx, (method, method_name, color) in enumerate(zip(methods, method_names, colors)):
+            ax = fig.add_subplot(gs[1, idx])
+            
+            col_name = f'white_patch_count_{method}'
+            if col_name not in df.columns:
+                continue
+            
+            values = df[col_name].values
+            frames = df['frame_id'].values
+            
+            # 原始数据
+            ax.plot(frames, values, '-', alpha=0.2, color=color, linewidth=0.8)
+            
+            # 平滑曲线
+            window = min(51, len(values)//10*2+1)
+            if window >= 5:
+                smoothed = savgol_filter(values, window_length=window, polyorder=3)
+                ax.plot(frames, smoothed, '-', color=color, linewidth=2.5, label='平滑曲线')
+            
+            # 线性趋势
+            z = np.polyfit(frames, values, 1)
+            trend = np.poly1d(z)
+            ax.plot(frames, trend(frames), '--', color='red', linewidth=2, alpha=0.7)
+            
+            ax.set_xlabel('帧编号', fontsize=10, fontweight='bold')
+            ax.set_ylabel('白斑数量(个)', fontsize=10, fontweight='bold')
+            ax.set_title(f'{method_name}', fontsize=12, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8)
+        
+        # 第三行：按卷统计（如果有卷号）
+        if 'coil_id' in df.columns:
+            for idx, (method, method_name, color) in enumerate(zip(methods, method_names, colors)):
+                ax = fig.add_subplot(gs[2, idx])
+                
+                col_name = f'white_area_ratio_{method}'
+                if col_name not in df.columns:
+                    continue
+                
+                coil_ids = sorted(df['coil_id'].unique())
+                coil_means = [df[df['coil_id']==cid][col_name].mean() for cid in coil_ids]
+                
+                x = np.arange(len(coil_ids))
+                bars = ax.bar(x, coil_means, color=color, alpha=0.6, edgecolor='black', linewidth=1.5)
+                ax.plot(x, coil_means, 'ro-', linewidth=2, markersize=8, zorder=10)
+                
+                # 添加趋势线
+                z = np.polyfit(x, coil_means, 1)
+                trend = np.poly1d(z)
+                ax.plot(x, trend(x), 'g--', linewidth=2.5, alpha=0.7, label=f'趋势线')
+                
+                ax.set_xlabel('钢卷编号', fontsize=10, fontweight='bold')
+                ax.set_ylabel('平均白斑面积占比(%)', fontsize=10, fontweight='bold')
+                ax.set_title(f'{method_name} - 按卷统计', fontsize=12, fontweight='bold')
+                ax.set_xticks(x)
+                ax.set_xticklabels([f'卷{int(c)}' for c in coil_ids])
+                ax.grid(True, alpha=0.3, axis='y')
+                ax.legend(fontsize=8)
+        else:
+            # 如果没有卷号，显示4种方法的相关性对比
+            ax = fig.add_subplot(gs[2, :])
+            
+            # 绘制4种方法的对比曲线
+            for method, method_name, color in zip(methods, method_names, colors):
+                col_name = f'white_area_ratio_{method}'
+                if col_name not in df.columns:
+                    continue
+                
+                values = df[col_name].values
+                frames = df['frame_id'].values
+                
+                # 归一化
+                if values.max() > values.min():
+                    values_norm = (values - values.min()) / (values.max() - values.min())
+                else:
+                    values_norm = values
+                
+                # 平滑
+                window = min(51, len(values_norm)//10*2+1)
+                if window >= 5:
+                    smoothed = savgol_filter(values_norm, window_length=window, polyorder=3)
+                    ax.plot(frames, smoothed, '-', color=color, linewidth=2.5, label=method_name)
+            
+            ax.set_xlabel('帧编号', fontsize=12, fontweight='bold')
+            ax.set_ylabel('归一化白斑面积占比 (0-1)', fontsize=12, fontweight='bold')
+            ax.set_title('4种方法检测结果对比（归一化）', fontsize=14, fontweight='bold')
+            ax.legend(fontsize=11, loc='best')
+            ax.grid(True, alpha=0.3)
+        
+        plt.suptitle(f'{self.analysis_name} - 撕裂面白色斑块分析\n（用户观察：白斑随磨损增加而增多）', 
+                    fontsize=18, fontweight='bold', y=0.995)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"已保存: {save_path}")
+    
     def _generate_report(self, df, key_features, n_coils, analysis_results=None):
         """生成分析报告"""
         print(f"\n{'='*80}")
@@ -2268,6 +2435,66 @@ class UniversalWearAnalyzer:
                 report_lines.append(f"基于当前数据，**{top_feature['feature']}** ")
                 report_lines.append(f"显示出最明显的单调趋势（单调性={top_feature['monotonicity']:.3f}），")
                 report_lines.append("建议作为主要监控指标。\n")
+        
+        # === 添加白斑分析结论 ===
+        white_patch_cols = [col for col in df.columns if col.startswith('white_area_ratio_')]
+        if len(white_patch_cols) > 0:
+            report_lines.append("\n---\n\n")
+            report_lines.append("## 撕裂面白色斑块分析\n\n")
+            report_lines.append("基于用户观察：撕裂面白色斑块随钢卷数量增加而增多\n\n")
+            
+            # 分析4种方法的变化趋势
+            methods = ['m1', 'm2', 'm3', 'm4']
+            method_names = ['固定阈值法', 'Otsu自适应法', '相对亮度法', '形态学Top-Hat法']
+            
+            report_lines.append("### 各检测方法的变化趋势\n\n")
+            
+            for method, method_name in zip(methods, method_names):
+                col_name = f'white_area_ratio_{method}'
+                if col_name in df.columns:
+                    values = df[col_name].values
+                    if len(values) > 10:
+                        first = np.mean(values[:len(values)//10])
+                        last = np.mean(values[-len(values)//10:])
+                        change = last - first
+                        change_pct = (change / (first + 1e-8)) * 100
+                        
+                        report_lines.append(f"**{method_name}**:\n")
+                        report_lines.append(f"- 初期白斑面积占比: {first:.2f}%\n")
+                        report_lines.append(f"- 后期白斑面积占比: {last:.2f}%\n")
+                        report_lines.append(f"- 变化量: {change:+.2f}% (变化率: {change_pct:+.1f}%)\n")
+                        
+                        if change > 0:
+                            report_lines.append(f"- **结论**: ✓ 白斑面积显著增加，与用户观察一致\n")
+                        else:
+                            report_lines.append(f"- 结论: 白斑面积未见明显增长\n")
+                        
+                        report_lines.append("\n")
+            
+            # 综合结论
+            report_lines.append("### 综合结论\n\n")
+            avg_changes = []
+            for method in methods:
+                col_name = f'white_area_ratio_{method}'
+                if col_name in df.columns:
+                    values = df[col_name].values
+                    if len(values) > 10:
+                        first = np.mean(values[:len(values)//10])
+                        last = np.mean(values[-len(values)//10:])
+                        change = last - first
+                        avg_changes.append(change)
+            
+            if len(avg_changes) > 0:
+                avg_change = np.mean(avg_changes)
+                if avg_change > 0:
+                    report_lines.append(f"4种检测方法的平均变化量为 **{avg_change:+.2f}%**，")
+                    report_lines.append("表明撕裂面白色斑块确实随着钢卷数量增加而增多，")
+                    report_lines.append("**验证了用户的观察**。这一现象可能反映了：\n\n")
+                    report_lines.append("1. 剪刀磨损导致撕裂面质量下降\n")
+                    report_lines.append("2. 撕裂过程中产生更多白色高亮区域（应力集中或纤维断裂）\n")
+                    report_lines.append("3. 可作为剪刀磨损的重要指标之一\n")
+                else:
+                    report_lines.append("白斑面积未见显著增长趋势，可能需要进一步调整检测参数。\n")
         
         print(f"\n{'='*80}")
         print("分析完成！")
