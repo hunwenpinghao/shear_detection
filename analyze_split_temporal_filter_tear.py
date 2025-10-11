@@ -6,6 +6,22 @@
 2. 从撕裂面区域中提取斑块数量和密度数据
 3. 绘制斑块数量和密度随时间变化的曲线图
 4. 生成时间序列分析报告
+
+使用示例：
+    # 基本使用
+    python analyze_split_temporal_filter_tear.py --roi_dir data/roi_imgs --output_dir output/tear_filter_analysis
+    
+    # 指定平滑参数
+    python analyze_split_temporal_filter_tear.py --roi_dir data/roi_imgs --output_dir output/tear_filter_analysis \\
+        --smoothing_method gaussian --sigma 10.0 --window_size 50
+    
+    # 控制可视化保存间隔（例如每100帧保存一次）
+    python analyze_split_temporal_filter_tear.py --roi_dir data/roi_imgs --output_dir output/tear_filter_analysis \\
+        --viz_interval 100
+    
+    # 跳过第一步（第一步已运行过）
+    python analyze_split_temporal_filter_tear.py --roi_dir data/roi_imgs --output_dir output/tear_filter_analysis \\
+        --skip_step1
 """
 
 import cv2
@@ -13,6 +29,7 @@ import numpy as np
 import os
 import glob
 import sys
+import argparse
 import matplotlib.pyplot as plt
 import pandas as pd
 from typing import List, Dict, Any, Tuple
@@ -73,12 +90,20 @@ def setup_chinese_font():
 class TearFilterTemporalAnalyzer:
     """撕裂面过滤时间序列分析器"""
     
-    def __init__(self):
-        """初始化分析器"""
+    def __init__(self, viz_interval=None, skip_step1=False):
+        """
+        初始化分析器
+        
+        Args:
+            viz_interval: 可视化保存间隔（None表示保存所有帧）
+            skip_step1: 是否跳过第一步的可视化保存（仍会进行检测以构建缓存）
+        """
         self.feature_extractor = FeatureExtractor(PREPROCESS_CONFIG)
         self.shear_tear_detector = ShearTearDetector()
         self.spot_processor = SpotProcessor()
         self.data = []
+        self.viz_interval = viz_interval
+        self.skip_step1 = skip_step1
         
     def extract_frame_info(self, filename: str) -> int:
         """从文件名提取帧号"""
@@ -101,6 +126,13 @@ class TearFilterTemporalAnalyzer:
         Returns:
             过滤后的撕裂面区域图像
         """
+        # 确保分割图像和原图尺寸一致
+        if roi_image.shape != segmented_image.shape:
+            # 如果尺寸不一致，将分割图像resize到与原图相同的尺寸
+            segmented_image = cv2.resize(segmented_image, 
+                                        (roi_image.shape[1], roi_image.shape[0]), 
+                                        interpolation=cv2.INTER_NEAREST)
+        
         # 从分割结果中提取剪切面mask（值为255的区域）
         shear_mask = (segmented_image == 255).astype(np.uint8) * 255
         
@@ -233,6 +265,14 @@ class TearFilterTemporalAnalyzer:
         """
         print("开始分析ROI图像的撕裂面斑块特征（使用剪切面过滤）...")
         
+        if self.skip_step1:
+            print("⚠️  跳过第一步可视化保存（仍会进行检测以构建缓存）")
+        
+        if self.viz_interval is not None:
+            print(f"可视化保存间隔: 每 {self.viz_interval} 帧保存一次")
+        else:
+            print("可视化保存间隔: 保存所有帧")
+        
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
         
@@ -241,7 +281,9 @@ class TearFilterTemporalAnalyzer:
         step2_dir = os.path.join(output_dir, 'step2_filtered_tear_regions')
         step3_dir = os.path.join(output_dir, 'step3_tear_patch_analysis')
         
-        os.makedirs(step1_dir, exist_ok=True)
+        # 只有不跳过第一步时才创建step1目录
+        if not self.skip_step1:
+            os.makedirs(step1_dir, exist_ok=True)
         os.makedirs(step2_dir, exist_ok=True)
         os.makedirs(step3_dir, exist_ok=True)
         
@@ -257,9 +299,18 @@ class TearFilterTemporalAnalyzer:
         
         results = []
         
+        # 缓存中间结果
+        segmentation_cache = {}  # 存储每帧的分割结果
+        roi_image_cache = {}  # 存储每帧的ROI图像
+        
         # 第一步：生成剪切面和撕裂面mask
-        print("\n第一步：生成剪切面和撕裂面mask...")
-        for roi_file in tqdm(roi_files, desc="生成剪切面撕裂面mask", unit="图像"):
+        if self.skip_step1:
+            print("\n第一步：生成剪切面和撕裂面mask（跳过可视化保存）...")
+        else:
+            print("\n第一步：生成剪切面和撕裂面mask...")
+        
+        saved_count = 0
+        for idx, roi_file in enumerate(tqdm(roi_files, desc="生成剪切面撕裂面mask", unit="图像")):
             frame_num = self.extract_frame_info(roi_file)
             if frame_num == -1:
                 continue
@@ -270,93 +321,118 @@ class TearFilterTemporalAnalyzer:
                 if roi_image is None:
                     continue
                 
-                # 使用ShearTearDetector检测剪切面和撕裂面
+                # 使用ShearTearDetector检测剪切面和撕裂面（所有帧都要计算）
                 result = self.shear_tear_detector.detect_surfaces(roi_image, visualize=False)
                 if result and 'segmented_image' in result:
                     segmented_image = result['segmented_image']
                     
-                    # 保存剪切面mask
-                    shear_mask = (segmented_image == 255).astype(np.uint8) * 255
-                    shear_filename = f"shear_mask_frame_{frame_num:06d}.png"
-                    shear_path = os.path.join(step1_dir, shear_filename)
-                    cv2.imwrite(shear_path, shear_mask)
+                    # 确保分割图像和原图尺寸一致
+                    if roi_image.shape != segmented_image.shape:
+                        # 如果尺寸不一致，将分割图像resize到与原图相同的尺寸
+                        segmented_image = cv2.resize(segmented_image, 
+                                                    (roi_image.shape[1], roi_image.shape[0]), 
+                                                    interpolation=cv2.INTER_NEAREST)
                     
-                    # 保存撕裂面mask
-                    tear_mask = (segmented_image == 128).astype(np.uint8) * 255
-                    tear_filename = f"tear_mask_frame_{frame_num:06d}.png"
-                    tear_path = os.path.join(step1_dir, tear_filename)
-                    cv2.imwrite(tear_path, tear_mask)
+                    # 缓存结果供后续步骤使用
+                    segmentation_cache[frame_num] = segmented_image
+                    roi_image_cache[frame_num] = roi_image
+                    
+                    # 判断是否需要保存可视化（如果跳过第一步，则不保存）
+                    if not self.skip_step1:
+                        should_save = (self.viz_interval is None) or (idx % self.viz_interval == 0)
+                        
+                        if should_save:
+                            # 保存剪切面mask
+                            shear_mask = (segmented_image == 255).astype(np.uint8) * 255
+                            shear_filename = f"shear_mask_frame_{frame_num:06d}.png"
+                            shear_path = os.path.join(step1_dir, shear_filename)
+                            cv2.imwrite(shear_path, shear_mask)
+                            
+                            # 保存撕裂面mask
+                            tear_mask = (segmented_image == 128).astype(np.uint8) * 255
+                            tear_filename = f"tear_mask_frame_{frame_num:06d}.png"
+                            tear_path = os.path.join(step1_dir, tear_filename)
+                            cv2.imwrite(tear_path, tear_mask)
+                            
+                            saved_count += 1
                     
             except Exception as e:
                 print(f"生成mask时出错 {roi_file}: {e}")
                 continue
         
-        print(f"第一步完成，剪切面和撕裂面mask已保存到: {step1_dir}")
+        if self.skip_step1:
+            print(f"第一步完成: 计算了 {len(segmentation_cache)} 帧（已跳过可视化保存）")
+        else:
+            print(f"第一步完成: 计算了 {len(segmentation_cache)} 帧，保存了 {saved_count} 帧可视化到: {step1_dir}")
         
         # 第二步：使用剪切面mask过滤出撕裂面区域
         print("\n第二步：过滤撕裂面区域...")
-        for roi_file in tqdm(roi_files, desc="过滤撕裂面区域", unit="图像"):
+        saved_count = 0
+        for idx, roi_file in enumerate(tqdm(roi_files, desc="过滤撕裂面区域", unit="图像")):
             frame_num = self.extract_frame_info(roi_file)
             if frame_num == -1:
                 continue
                 
             try:
-                # 读取ROI图像
-                roi_image = cv2.imread(roi_file, cv2.IMREAD_GRAYSCALE)
-                if roi_image is None:
+                # 从缓存中获取分割结果和ROI图像
+                if frame_num not in segmentation_cache or frame_num not in roi_image_cache:
                     continue
                 
-                # 使用ShearTearDetector检测剪切面和撕裂面
-                result = self.shear_tear_detector.detect_surfaces(roi_image, visualize=False)
-                if result and 'segmented_image' in result:
-                    segmented_image = result['segmented_image']
-                    
-                    # 使用剪切面mask过滤出撕裂面区域
-                    filtered_tear_region, shear_mask = self.filter_tear_region_with_shear_mask(roi_image, segmented_image)
-                    
+                segmented_image = segmentation_cache[frame_num]
+                roi_image = roi_image_cache[frame_num]
+                
+                # 使用剪切面mask过滤出撕裂面区域（所有帧都要计算）
+                filtered_tear_region, shear_mask = self.filter_tear_region_with_shear_mask(roi_image, segmented_image)
+                
+                # 【优化】直接调用 feature_extractor 进行斑块检测（所有帧都要计算）
+                # 不生成可视化图，大幅提速
+                spot_result = self.feature_extractor.detect_all_white_spots(roi_image)
+                
+                # 判断是否需要保存可视化
+                should_save = (self.viz_interval is None) or (idx % self.viz_interval == 0)
+                
+                if should_save:
                     # 保存过滤后的撕裂面区域
                     filtered_filename = f"filtered_tear_region_frame_{frame_num:06d}.png"
                     filtered_path = os.path.join(step2_dir, filtered_filename)
                     cv2.imwrite(filtered_path, filtered_tear_region)
                     
-                    # 使用SpotProcessor生成斑块可视化图
+                    # 生成并保存斑块图
                     patch_filename = f"tear_patches_frame_{frame_num:06d}.png"
                     patch_path = os.path.join(step2_dir, patch_filename)
-                    
-                    # 使用SpotProcessor处理单个ROI图像
-                    spot_result = self.spot_processor.process_single_roi_spots(roi_file, patch_path)
+                    spot_binary = spot_result.get('all_white_binary_mask', None)
+                    if spot_binary is not None:
+                        spot_visualization = self.spot_processor.create_spot_visualization(roi_image, spot_binary)
+                        cv2.imwrite(patch_path, spot_visualization)
                     
                     # 创建撕裂面斑块可视化图
-                    self.create_tear_patch_visualization(roi_image, filtered_tear_region, spot_result, step2_dir, frame_num)
+                    spot_result_with_path = {
+                        'success': True,
+                        'spot_count': spot_result.get('all_spot_count', 0),
+                        'spot_density': spot_result.get('all_spot_density', 0.0),
+                        'output_path': patch_path
+                    }
+                    self.create_tear_patch_visualization(roi_image, filtered_tear_region, spot_result_with_path, step2_dir, frame_num)
                     
-                    # 提取关键信息
-                    if spot_result['success']:
-                        result_data = {
-                            'frame_num': frame_num,
-                            'time_seconds': frame_num * 5,  # 假设每5秒一帧
-                            'spot_count': spot_result.get('spot_count', 0),
-                            'spot_density': spot_result.get('spot_density', 0.0),
-                            'image_shape': roi_image.shape,
-                            'roi_file': roi_file
-                        }
-                    else:
-                        # 如果斑块检测失败，使用默认值
-                        result_data = {
-                            'frame_num': frame_num,
-                            'time_seconds': frame_num * 5,
-                            'spot_count': 0,
-                            'spot_density': 0.0,
-                            'image_shape': roi_image.shape,
-                            'roi_file': roi_file
-                        }
-                    
-                    results.append(result_data)
+                    saved_count += 1
+                
+                # 提取关键信息（所有帧都要记录）
+                result_data = {
+                    'frame_num': frame_num,
+                    'time_seconds': frame_num * 5,  # 假设每5秒一帧
+                    'spot_count': spot_result.get('all_spot_count', 0),
+                    'spot_density': spot_result.get('all_spot_density', 0.0),
+                    'image_shape': roi_image.shape,
+                    'roi_file': roi_file
+                }
+                
+                results.append(result_data)
                     
             except Exception as e:
                 print(f"分析ROI图像 {roi_file} 时出错: {e}")
                 continue
         
-        print(f"第二步完成，过滤后的撕裂面区域和斑块图已保存到: {step2_dir}")
+        print(f"第二步完成: 计算了 {len(results)} 帧，保存了 {saved_count} 帧可视化到: {step2_dir}")
         
         # 第三步：生成时间序列分析
         print("\n第三步：生成时间序列分析...")
@@ -690,21 +766,82 @@ class TearFilterTemporalAnalyzer:
 
 def main():
     """主函数"""
-    # 初始化分析器
-    analyzer = TearFilterTemporalAnalyzer()
+    parser = argparse.ArgumentParser(
+        description='撕裂面斑块时间序列分析（使用剪切面mask过滤）',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+  # 基本使用
+  python analyze_split_temporal_filter_tear.py --roi_dir data/roi_imgs --output_dir output/tear_filter_analysis
+  
+  # 指定平滑参数和可视化间隔
+  python analyze_split_temporal_filter_tear.py --roi_dir data/roi_imgs --output_dir output/tear_filter_analysis \\
+      --smoothing_method gaussian --sigma 10.0 --window_size 50 --viz_interval 100
+  
+  # 跳过第一步的可视化保存（第一步已运行过）
+  python analyze_split_temporal_filter_tear.py --roi_dir data/roi_imgs --output_dir output/tear_filter_analysis \\
+      --skip_step1
+  
+  # 跳过第一步+自定义可视化间隔
+  python analyze_split_temporal_filter_tear.py --roi_dir data/roi_imgs --output_dir output/tear_filter_analysis \\
+      --skip_step1 --viz_interval 200
+  
+  # 不保存任何可视化（仅生成数据和曲线）
+  python analyze_split_temporal_filter_tear.py --roi_dir data/roi_imgs --output_dir output/tear_filter_analysis \\
+      --viz_interval 0
+        """
+    )
     
-    # 运行分析（使用高斯滤波，σ=10，窗口大小50）
+    # 必需参数
+    parser.add_argument('--roi_dir', type=str, required=True,
+                        help='ROI图像目录路径')
+    parser.add_argument('--output_dir', type=str, required=True,
+                        help='输出目录路径')
+    
+    # 平滑参数
+    parser.add_argument('--smoothing_method', type=str, 
+                        choices=['gaussian', 'moving_avg', 'savgol', 'median'],
+                        default='gaussian',
+                        help='平滑方法 (默认: gaussian)')
+    parser.add_argument('--window_size', type=int, default=50,
+                        help='滤波窗口大小 (默认: 50)')
+    parser.add_argument('--sigma', type=float, default=10.0,
+                        help='高斯滤波标准差 (默认: 10.0)')
+    
+    # 可视化控制参数
+    parser.add_argument('--viz_interval', type=int, default=100,
+                        help='可视化保存间隔（默认: 100；设置为None保存所有帧，设置为0表示不保存可视化）')
+    
+    # 步骤控制参数
+    parser.add_argument('--skip_step1', action='store_true',
+                        help='跳过第一步的可视化保存（仍会进行检测以构建缓存，适合第一步已运行过的情况）')
+    
+    args = parser.parse_args()
+    
+    # 处理 viz_interval=0 的情况（不保存任何可视化）
+    if args.viz_interval == 0:
+        print("⚠️  viz_interval=0: 将不保存任何中间可视化结果")
+        viz_interval = 1  # 设置一个很大的值来跳过所有可视化
+        # 实际上我们可以用一个特殊标志来完全跳过
+    else:
+        viz_interval = args.viz_interval
+    
+    # 初始化分析器
+    analyzer = TearFilterTemporalAnalyzer(viz_interval=viz_interval, skip_step1=args.skip_step1)
+    
+    # 运行分析
     data = analyzer.run_analysis(
-        roi_dir="data/roi_imgs",
-        output_dir="output/tear_filter_temporal_analysis",
-        smoothing_method='gaussian',
-        window_size=50,
-        sigma=10.0
+        roi_dir=args.roi_dir,
+        output_dir=args.output_dir,
+        smoothing_method=args.smoothing_method,
+        window_size=args.window_size,
+        sigma=args.sigma
     )
     
     if data:
         print(f"\n🎯 分析完成！共分析了 {len(data)} 个时间点的撕裂面斑块数据")
         print("📈 生成了平滑时间序列曲线图和统计摘要")
+        print(f"📁 结果保存在: {args.output_dir}")
 
 
 if __name__ == "__main__":

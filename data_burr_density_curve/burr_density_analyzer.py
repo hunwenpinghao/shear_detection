@@ -263,7 +263,7 @@ class BurrDensityAnalyzer:
         use_contour_method = True
         detector = ShearTearDetector(use_contour_method=use_contour_method)
         
-        skip_step1 = True
+        skip_step1 = False
         detection_results = {}  # 缓存所有帧的检测结果供后续步骤使用
         
         if not skip_step1:
@@ -323,7 +323,7 @@ class BurrDensityAnalyzer:
             print(f"  - 共计算 {len(detection_results)} 个撕裂面（所有帧）")
             print(f"  - 共保存 {step1_count} 个可视化mask（采样间隔: {visualization_interval}）")
         
-        skip_step2 = True
+        skip_step2 = False
         burr_cache = {}  # 缓存所有帧的毛刺检测结果
         
         if not skip_step2:

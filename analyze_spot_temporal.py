@@ -5,6 +5,22 @@
 1. 从斑块检测结果中提取斑块数量和密度数据
 2. 绘制斑块数量和密度随时间变化的曲线图
 3. 生成时间序列分析报告
+4. 支持命令行参数配置
+
+用法:
+    python analyze_spot_temporal.py --roi_dir data/roi_imgs --output_dir output
+    
+示例:
+    # 基本用法
+    python analyze_spot_temporal.py --roi_dir data/roi_imgs --output_dir output/spot_analysis
+    
+    # 自定义平滑参数
+    python analyze_spot_temporal.py --roi_dir data/roi_imgs --output_dir output \
+        --smoothing_method savgol --window_size 100 --sigma 15.0
+    
+    # 保存每一帧的可视化（每100帧）
+    python analyze_spot_temporal.py --roi_dir data/roi_imgs --output_dir output \
+        --viz_interval 100
 """
 
 import cv2
@@ -12,6 +28,7 @@ import numpy as np
 import os
 import glob
 import sys
+import argparse
 import matplotlib.pyplot as plt
 import pandas as pd
 from typing import List, Dict, Any, Tuple
@@ -19,6 +36,7 @@ import json
 import platform
 from scipy import signal
 from scipy.ndimage import gaussian_filter1d
+from tqdm import tqdm
 
 # 添加data_process目录到路径
 sys.path.append(os.path.join(os.path.dirname(__file__), 'data_process'))
@@ -67,10 +85,16 @@ def setup_chinese_font():
 class SpotTemporalAnalyzer:
     """斑块时间序列分析器"""
     
-    def __init__(self):
-        """初始化分析器"""
+    def __init__(self, viz_interval: int = None):
+        """
+        初始化分析器
+        
+        Args:
+            viz_interval: 可视化采样间隔，每隔多少帧保存一次标注图（默认None=不保存）
+        """
         self.feature_extractor = FeatureExtractor(PREPROCESS_CONFIG)
         self.data = []
+        self.viz_interval = viz_interval
         
     def extract_frame_info(self, filename: str) -> int:
         """从文件名提取帧号"""
@@ -82,17 +106,20 @@ class SpotTemporalAnalyzer:
         except (IndexError, ValueError):
             return -1
     
-    def analyze_roi_spots(self, roi_dir: str) -> List[Dict[str, Any]]:
+    def analyze_roi_spots(self, roi_dir: str, output_dir: str = "output") -> List[Dict[str, Any]]:
         """
         分析ROI图像的斑块特征
         
         Args:
             roi_dir: ROI图像目录路径
+            output_dir: 输出目录（用于保存可视化）
             
         Returns:
             斑块分析结果列表
         """
         print("开始分析ROI图像的斑块特征...")
+        if self.viz_interval:
+            print(f"可视化采样间隔: 每 {self.viz_interval} 帧")
         
         # 获取所有ROI图像文件
         roi_pattern = os.path.join(roi_dir, "*_roi.png")
@@ -104,8 +131,14 @@ class SpotTemporalAnalyzer:
         
         print(f"找到 {len(roi_files)} 个ROI图像文件")
         
+        # 创建可视化目录
+        viz_count = 0
+        if self.viz_interval:
+            viz_dir = os.path.join(output_dir, 'spot_visualizations')
+            os.makedirs(viz_dir, exist_ok=True)
+        
         results = []
-        for i, roi_file in enumerate(roi_files):
+        for i, roi_file in enumerate(tqdm(roi_files, desc="分析斑块")):
             frame_num = self.extract_frame_info(roi_file)
             if frame_num == -1:
                 continue
@@ -131,16 +164,79 @@ class SpotTemporalAnalyzer:
                 
                 results.append(result)
                 
-                # 每100帧输出一次进度
-                if (i + 1) % 100 == 0:
-                    print(f"已分析 {i + 1}/{len(roi_files)} 个ROI图像")
+                # 保存可视化（按采样间隔）
+                if self.viz_interval and i % self.viz_interval == 0:
+                    self._save_spot_visualization(
+                        roi_image, spot_result, frame_num, viz_dir
+                    )
+                    viz_count += 1
                     
             except Exception as e:
-                print(f"分析ROI图像 {roi_file} 时出错: {e}")
+                print(f"\n分析ROI图像 {roi_file} 时出错: {e}")
                 continue
         
-        print(f"斑块分析完成，成功分析 {len(results)} 个ROI图像")
+        print(f"\n斑块分析完成，成功分析 {len(results)} 个ROI图像")
+        if self.viz_interval:
+            print(f"已保存可视化: {viz_count} 张（采样间隔: {self.viz_interval}）")
+        
         return results
+    
+    def _save_spot_visualization(self, roi_image: np.ndarray, spot_result: dict, 
+                                frame_num: int, viz_dir: str):
+        """
+        保存斑块检测可视化结果
+        
+        Args:
+            roi_image: ROI图像
+            spot_result: 斑块检测结果
+            frame_num: 帧号
+            viz_dir: 可视化输出目录
+        """
+        try:
+            # 创建彩色图像用于标注
+            vis_image = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2RGB)
+            
+            # 获取所有斑块的轮廓
+            if 'all_spot_contours' in spot_result and spot_result['all_spot_contours']:
+                # 绘制斑块轮廓
+                cv2.drawContours(vis_image, spot_result['all_spot_contours'], -1, 
+                               (0, 255, 0), 2)  # 绿色轮廓
+                
+                # 标注斑块中心和编号
+                for idx, contour in enumerate(spot_result['all_spot_contours'], 1):
+                    M = cv2.moments(contour)
+                    if M['m00'] != 0:
+                        cx = int(M['m10'] / M['m00'])
+                        cy = int(M['m01'] / M['m00'])
+                        # 绘制中心点
+                        cv2.circle(vis_image, (cx, cy), 3, (255, 0, 0), -1)  # 蓝色中心点
+                        # 标注编号（只标注前50个，避免太密集）
+                        if idx <= 50:
+                            cv2.putText(vis_image, str(idx), (cx+5, cy-5),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+            
+            # 添加统计信息
+            spot_count = spot_result.get('all_spot_count', 0)
+            spot_density = spot_result.get('all_spot_density', 0.0)
+            
+            info_text = [
+                f"Frame: {frame_num}",
+                f"Spot Count: {spot_count}",
+                f"Density: {spot_density:.4f}"
+            ]
+            
+            y_offset = 30
+            for text in info_text:
+                cv2.putText(vis_image, text, (10, y_offset),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                y_offset += 30
+            
+            # 保存图像
+            viz_path = os.path.join(viz_dir, f"frame_{frame_num:06d}_spots.png")
+            cv2.imwrite(viz_path, vis_image)
+            
+        except Exception as e:
+            print(f"\n保存可视化失败 frame {frame_num}: {e}")
     
     def apply_smoothing_filters(self, data: List[Dict[str, Any]], 
                                smoothing_method: str = 'gaussian',
@@ -408,10 +504,17 @@ class SpotTemporalAnalyzer:
             window_size: 滤波窗口大小
             sigma: 高斯滤波标准差
         """
-        print("=== 撕裂面斑块时间序列分析 (平滑滤波) ===")
+        print("\n" + "="*80)
+        print("ROI斑块时间序列分析 (整个ROI区域，不区分撕裂面和剪切面)")
+        print("="*80)
+        print(f"ROI目录: {roi_dir}")
+        print(f"输出目录: {output_dir}")
+        print(f"平滑方法: {smoothing_method}")
+        if self.viz_interval:
+            print(f"可视化间隔: 每 {self.viz_interval} 帧")
         
         # 分析ROI图像的斑块特征
-        data = self.analyze_roi_spots(roi_dir)
+        data = self.analyze_roi_spots(roi_dir, output_dir)
         
         if not data:
             print("没有可分析的数据")
@@ -426,10 +529,14 @@ class SpotTemporalAnalyzer:
         # 输出统计摘要
         self.print_statistics_summary(data)
         
-        print(f"\n✅ 斑块时间序列分析完成！")
-        print(f"📊 平滑图表保存位置: {plot_path}")
-        print(f"📁 数据保存位置: {output_dir}")
+        print(f"\n{'='*80}")
+        print("✅ 斑块时间序列分析完成！")
+        print(f"{'='*80}")
+        print(f"📊 平滑图表: {plot_path}")
+        print(f"📁 数据文件: {output_dir}")
         print(f"🔧 平滑方法: {smoothing_method}, 窗口大小: {window_size}, σ: {sigma}")
+        if self.viz_interval:
+            print(f"🖼️  可视化: {output_dir}/spot_visualizations/")
         
         return data
     
@@ -467,22 +574,76 @@ class SpotTemporalAnalyzer:
 
 def main():
     """主函数"""
-    # 初始化分析器
-    analyzer = SpotTemporalAnalyzer()
+    parser = argparse.ArgumentParser(
+        description='ROI斑块时间序列分析工具 - 统计整个ROI区域的斑块数量和密度变化',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 基本用法
+  python analyze_spot_temporal.py --roi_dir data/roi_imgs --output_dir output/spot_analysis
+  
+  # 自定义平滑参数（Savitzky-Golay滤波）
+  python analyze_spot_temporal.py --roi_dir data/roi_imgs --output_dir output \
+    --smoothing_method savgol --window_size 100
+  
+  # 保存每一帧的可视化（每50帧）
+  python analyze_spot_temporal.py --roi_dir data/roi_imgs --output_dir output \
+    --viz_interval 50
+  
+  # 使用高斯滤波+自定义σ值
+  python analyze_spot_temporal.py --roi_dir data/roi_imgs --output_dir output \
+    --smoothing_method gaussian --sigma 15.0
+  
+  # 批量处理多个视频
+  python analyze_spot_temporal.py --roi_dir video1/roi_imgs --output_dir video1/spot_analysis
+  python analyze_spot_temporal.py --roi_dir video2/roi_imgs --output_dir video2/spot_analysis --viz_interval 100
+        """
+    )
     
-    # 运行分析（使用高斯滤波，σ=10，窗口大小50）
+    # 必需参数
+    parser.add_argument('--roi_dir', type=str, default='data/roi_imgs',
+                       help='ROI图像目录路径 (默认: data/roi_imgs)')
+    parser.add_argument('--output_dir', type=str, default='output/spot_temporal',
+                       help='输出目录路径 (默认: output/spot_temporal)')
+    
+    # 可选参数
+    parser.add_argument('--smoothing_method', type=str, default='gaussian',
+                       choices=['gaussian', 'moving_avg', 'savgol', 'median'],
+                       help='平滑方法: gaussian=高斯滤波, moving_avg=移动平均, '
+                            'savgol=Savitzky-Golay滤波, median=中值滤波 (默认: gaussian)')
+    parser.add_argument('--window_size', type=int, default=50,
+                       help='滤波窗口大小 (默认: 50)')
+    parser.add_argument('--sigma', type=float, default=10.0,
+                       help='高斯滤波的标准差σ (默认: 10.0)')
+    parser.add_argument('--viz_interval', type=int, default=None,
+                       help='可视化采样间隔，每隔多少帧保存一次斑块标注图 (默认: None=不保存)')
+    
+    args = parser.parse_args()
+    
+    # 检查输入目录
+    if not os.path.exists(args.roi_dir):
+        print(f"错误: ROI目录不存在: {args.roi_dir}")
+        return 1
+    
+    # 初始化分析器
+    analyzer = SpotTemporalAnalyzer(viz_interval=args.viz_interval)
+    
+    # 运行分析
     data = analyzer.run_analysis(
-        roi_dir="data/roi_imgs",
-        output_dir="output/temporal_analysis",
-        smoothing_method='gaussian',
-        window_size=50,
-        sigma=10.0
+        roi_dir=args.roi_dir,
+        output_dir=args.output_dir,
+        smoothing_method=args.smoothing_method,
+        window_size=args.window_size,
+        sigma=args.sigma
     )
     
     if data:
         print(f"\n🎯 分析完成！共分析了 {len(data)} 个时间点的斑块数据")
         print("📈 生成了平滑时间序列曲线图和统计摘要")
+    
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

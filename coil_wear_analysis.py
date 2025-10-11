@@ -55,7 +55,8 @@ class UniversalWearAnalyzer:
     
     def __init__(self, roi_dir: str, output_dir: str, analysis_name: str = "视频分析", 
                  min_coils: int = 5, max_coils: int = 15,
-                 diagnosis_interval: int = 100, marker_interval: int = 100):
+                 diagnosis_interval: int = 100, marker_interval: int = 100,
+                 n_coils: int = None, detection_method: str = "valley"):
         """
         初始化分析器
         
@@ -63,10 +64,12 @@ class UniversalWearAnalyzer:
             roi_dir: ROI图像目录
             output_dir: 输出目录
             analysis_name: 分析名称
-            min_coils: 最小钢卷数
-            max_coils: 最大钢卷数
+            min_coils: 最小钢卷数（自动检测时使用）
+            max_coils: 最大钢卷数（自动检测时使用）
             diagnosis_interval: 帧诊断图采样间隔（默认100）
             marker_interval: 白斑标注图采样间隔（默认100）
+            n_coils: 直接指定钢卷数（如果指定，则跳过自动检测，速度快10倍）
+            detection_method: 检测方法 ("valley"=波谷检测法[推荐], "pelt"=Pelt算法)
         """
         self.roi_dir = os.path.abspath(roi_dir)
         self.output_dir = os.path.abspath(output_dir)
@@ -75,6 +78,8 @@ class UniversalWearAnalyzer:
         self.max_coils = max_coils
         self.diagnosis_interval = diagnosis_interval
         self.marker_interval = marker_interval
+        self.n_coils = n_coils  # 直接指定钢卷数（快速模式）
+        self.detection_method = detection_method  # 检测方法选择
         
         # 创建输出目录
         ensure_dir(output_dir)
@@ -247,6 +252,205 @@ class UniversalWearAnalyzer:
         
         return score
     
+    def _detect_by_valley_method(self, df: pd.DataFrame) -> list:
+        """
+        波谷检测法：通过二次滤波 + 波谷检测来识别钢卷边界
+        
+        原理：
+        1. 对信号进行二次平滑滤波，过滤假波谷
+        2. 检测波谷（局部最小值点）
+        3. 相邻波谷之间为一个钢卷
+        
+        优势：速度快、逻辑清晰、物理意义明确
+        
+        Args:
+            df: 特征数据
+            
+        Returns:
+            钢卷边界索引列表
+        """
+        print("🌊 使用波谷检测法识别钢卷边界...")
+        
+        # 获取信号
+        if 'weighted_score' in df.columns:
+            signal = df['weighted_score'].values
+            print("使用综合磨损指数")
+        else:
+            key_features = ['avg_gradient_energy', 'max_notch_depth', 'avg_rms_roughness']
+            scaler = StandardScaler()
+            features_for_detection = []
+            
+            for feature in key_features:
+                if feature in df.columns:
+                    features_for_detection.append(df[feature].values)
+            
+            if len(features_for_detection) == 0:
+                print("警告: 没有足够的特征用于检测")
+                return None
+            
+            combined_signal = np.column_stack(features_for_detection)
+            signal = scaler.fit_transform(combined_signal).mean(axis=1)
+            print("使用多特征组合")
+        
+        # 第一次平滑：大窗口滤波
+        window1 = min(201, len(signal)//4*2+1)
+        if window1 >= 5:
+            signal_smooth1 = savgol_filter(signal, window_length=window1, polyorder=3)
+            print(f"第一次平滑：窗口大小 {window1}")
+        else:
+            signal_smooth1 = signal
+        
+        # 第二次平滑：进一步平滑
+        window2 = min(151, len(signal_smooth1)//6*2+1)
+        if window2 >= 5:
+            signal_smooth2 = savgol_filter(signal_smooth1, window_length=window2, polyorder=3)
+            print(f"第二次平滑：窗口大小 {window2}")
+        else:
+            signal_smooth2 = signal_smooth1
+        
+        # 检测波谷（局部最小值）
+        # distance: 相邻波谷的最小距离（避免检测到假波谷）
+        min_distance = max(100, len(signal_smooth2) // (self.max_coils + 5))
+        
+        # 反转信号来检测波谷（find_peaks 检测波峰）
+        inverted_signal = -signal_smooth2
+        
+        # prominence: 波峰显著性（过滤不明显的波峰）
+        prominence = np.std(signal_smooth2) * 0.3  # 波动幅度的30%
+        
+        print(f"波谷检测参数：最小距离={min_distance}帧, 显著性阈值={prominence:.3f}")
+        
+        valleys, properties = find_peaks(
+            inverted_signal, 
+            distance=min_distance,
+            prominence=prominence,
+            width=20  # 波谷最小宽度
+        )
+        
+        print(f"检测到 {len(valleys)} 个波谷")
+        
+        if len(valleys) == 0:
+            print("⚠️ 未检测到明显的波谷，使用默认均匀分割")
+            default_coils = (self.min_coils + self.max_coils) // 2
+            coil_size = len(df) // default_coils
+            boundaries = [i * coil_size for i in range(default_coils)]
+            boundaries[0] = 0
+            return boundaries
+        
+        # 波谷数量 = 钢卷数 - 1（两个钢卷之间有一个波谷）
+        n_coils = len(valleys) + 1
+        
+        # 检查是否在合理范围内
+        if n_coils < self.min_coils:
+            print(f"⚠️ 检测到的钢卷数 ({n_coils}) 少于最小值 ({self.min_coils})")
+            print("提示：可能需要调整 --min_coils 参数")
+        elif n_coils > self.max_coils:
+            print(f"⚠️ 检测到的钢卷数 ({n_coils}) 多于最大值 ({self.max_coils})")
+            print("提示：可能需要调整 --max_coils 参数或增加平滑强度")
+            # 只保留最显著的波谷
+            n_valleys_to_keep = self.max_coils - 1
+            prominences = properties['prominences']
+            top_indices = np.argsort(prominences)[-n_valleys_to_keep:]
+            valleys = valleys[sorted(top_indices)]
+            n_coils = len(valleys) + 1
+            print(f"保留最显著的 {len(valleys)} 个波谷，调整为 {n_coils} 个钢卷")
+        
+        # 构建边界列表：[0, 波谷1, 波谷2, ..., 波谷n]
+        boundaries = [0] + valleys.tolist()
+        
+        print(f"✓ 检测到 {n_coils} 个钢卷")
+        print(f"边界位置（波谷）: {valleys.tolist()}")
+        
+        # 输出每个钢卷的长度
+        segment_lengths = []
+        for i in range(len(boundaries)):
+            start = boundaries[i]
+            end = boundaries[i+1] if i+1 < len(boundaries) else len(signal)
+            length = end - start
+            segment_lengths.append(length)
+            print(f"  第{i+1}卷: {length}帧 (帧 {start} → {end})")
+        
+        # 验证分割质量
+        self._validate_segmentation(signal_smooth2, boundaries, n_coils)
+        
+        return boundaries
+    
+    def _detect_with_fixed_n_coils(self, df: pd.DataFrame, n_coils: int) -> list:
+        """
+        快速模式：直接指定钢卷数进行检测（速度快10倍）
+        
+        Args:
+            df: 特征数据
+            n_coils: 钢卷数量
+            
+        Returns:
+            钢卷边界索引列表
+        """
+        # 优先使用综合磨损指数
+        if 'weighted_score' in df.columns:
+            signal = df['weighted_score'].values
+        else:
+            # 使用关键特征组合
+            key_features = ['avg_gradient_energy', 'max_notch_depth', 'avg_rms_roughness']
+            scaler = StandardScaler()
+            features_for_detection = []
+            
+            for feature in key_features:
+                if feature in df.columns:
+                    features_for_detection.append(df[feature].values)
+            
+            if len(features_for_detection) == 0:
+                print("警告: 没有足够的特征用于检测，使用均匀分割")
+                coil_size = len(df) // n_coils
+                boundaries = [i * coil_size for i in range(n_coils)]
+                boundaries[0] = 0
+                return boundaries
+            
+            combined_signal = np.column_stack(features_for_detection)
+            signal = scaler.fit_transform(combined_signal).mean(axis=1)
+        
+        # 平滑信号
+        window = min(151, len(signal)//6*2+1)
+        if window >= 5:
+            signal_smooth = savgol_filter(signal, window_length=window, polyorder=3)
+        else:
+            signal_smooth = signal
+        
+        # 使用Pelt算法直接指定断点数
+        try:
+            model = "l2"
+            min_segment_size = max(len(df)//(n_coils * 2), 50)
+            jump_size = max(20, min(100, len(signal_smooth) // 100))
+            
+            print(f"最小段长度: {min_segment_size} 帧, 跳跃步长: {jump_size}")
+            print("拟合模型中...")
+            
+            algo = rp.Pelt(model=model, min_size=int(min_segment_size), jump=jump_size)
+            algo.fit(signal_smooth.reshape(-1, 1))
+            
+            # 直接指定断点数（比搜索penalty快10倍）
+            print(f"检测 {n_coils} 个钢卷的边界...")
+            boundaries = algo.predict(n_bkps=n_coils-1)
+            
+            # 去掉最后的边界点
+            boundaries = [0] + boundaries[:-1]
+            
+            print(f"✓ 快速检测完成，共 {len(boundaries)} 个钢卷")
+            print(f"边界位置: {boundaries}")
+            
+            # 验证分割质量
+            self._validate_segmentation(signal_smooth, boundaries, len(boundaries))
+            
+            return boundaries
+            
+        except Exception as e:
+            print(f"快速检测失败: {e}")
+            print("使用均匀分割作为备选")
+            coil_size = len(df) // n_coils
+            boundaries = [i * coil_size for i in range(n_coils)]
+            boundaries[0] = 0
+            return boundaries
+    
     def _validate_segmentation(self, signal: np.ndarray, boundaries: list, n_coils: int):
         """
         快速验证分割质量并输出关键信息
@@ -296,8 +500,37 @@ class UniversalWearAnalyzer:
         Returns:
             钢卷边界索引列表
         """
-        print(f"\n自动检测钢卷边界...")
-        print(f"钢卷数范围: {self.min_coils}-{self.max_coils}个")
+        print(f"\n检测钢卷边界...")
+        
+        # 快速模式：直接指定钢卷数
+        if self.n_coils is not None:
+            print(f"⚡ 快速模式：使用指定的钢卷数 {self.n_coils}")
+            return self._detect_with_fixed_n_coils(df, self.n_coils)
+        
+        # 自动检测模式
+        print(f"🔍 自动检测模式：钢卷数范围 {self.min_coils}-{self.max_coils}个")
+        
+        # 方法选择
+        if self.detection_method == "valley":
+            print("📊 使用波谷检测法（推荐，快速且直观）")
+            return self._detect_by_valley_method(df)
+        elif self.detection_method == "pelt":
+            print("📊 使用Pelt变化点检测法")
+            return self._detect_by_pelt_method(df)
+        else:
+            print(f"⚠️ 未知的检测方法: {self.detection_method}，使用默认波谷检测法")
+            return self._detect_by_valley_method(df)
+    
+    def _detect_by_pelt_method(self, df: pd.DataFrame) -> list:
+        """
+        Pelt算法检测法（原自动检测逻辑）
+        
+        Args:
+            df: 特征数据
+            
+        Returns:
+            钢卷边界索引列表
+        """
         
         # 优先使用综合磨损指数（如果已经计算）
         if 'weighted_score' in df.columns:
@@ -331,12 +564,17 @@ class UniversalWearAnalyzer:
         
         # 使用Pelt算法检测变化点
         try:
-            model = "rbf"  # 使用RBF核，对平滑变化更敏感
+            model = "l2"  # 使用L2模型（比RBF快3-5倍）
             # 大幅增大 min_size，避免过度分割
             min_segment_size = max(len(df)//(self.max_coils * 2), 50)  # 更灵活的最小段长度
-            print(f"最小段长度: {min_segment_size} 帧")
-            algo = rp.Pelt(model=model, min_size=int(min_segment_size), jump=10)
+            # 自适应调整 jump 参数：数据量大时用更大的跳跃步长
+            jump_size = max(20, min(100, len(signal_smooth) // 100))  # 根据数据量自适应
+            print(f"最小段长度: {min_segment_size} 帧, 跳跃步长: {jump_size}")
+            
+            algo = rp.Pelt(model=model, min_size=int(min_segment_size), jump=jump_size)
+            print("拟合模型中...")
             algo.fit(signal_smooth.reshape(-1, 1))
+            print("✓ 模型拟合完成")
             
             # 自适应钢卷数量检测 - 不预设目标数量
             best_boundaries = None
@@ -344,15 +582,16 @@ class UniversalWearAnalyzer:
             best_score = -float('inf')  # 使用综合评分而非距离
             all_results = {}  # 用字典记录每个n值对应的penalty和评分
             
-            # 快速自适应penalty搜索策略
-            print(f"正在搜索最优penalty参数（快速自适应检测）...")
+            # 快速自适应penalty搜索策略（两阶段搜索）
+            print(f"正在搜索最优penalty参数（两阶段快速检测）...")
             
-            # 使用更少的搜索点，专注关键区域
-            penalties = np.logspace(-1, 2.5, 15)  # 从0.1到316，只用15个点
+            # 第一阶段：粗搜索（8个点）
+            penalties_coarse = np.logspace(-1, 2.5, 8)  # 从0.1到316，只用8个点
             
-            print(f"快速搜索 {len(penalties)} 个penalty值...")
+            print(f"阶段1：粗搜索 {len(penalties_coarse)} 个penalty值...")
             good_enough_score = 1.5  # 降低阈值，更容易触发早期停止
-            min_search_points = 8    # 至少搜索8个点
+            min_search_points = 5    # 至少搜索5个点
+            penalties = penalties_coarse  # 默认使用粗搜索结果
             
             for i, penalty in enumerate(penalties):
                 try:
@@ -375,12 +614,16 @@ class UniversalWearAnalyzer:
                         best_score = segment_score
                         best_boundaries = boundaries
                         best_n_coils = n_segments
-                        print(f"✓ 发现更优分割: {n_segments}个钢卷 (penalty={penalty:.2f}, score={segment_score:.3f})")
+                        print(f"  [{i+1}/{len(penalties)}] {n_segments}个钢卷 (penalty={penalty:.2f}, score={segment_score:.3f}) ✓")
                         
                         # 更积极的早期停止策略
                         if segment_score > good_enough_score and i >= min_search_points:
-                            print(f"✓ 找到足够好的结果，提前结束搜索 (已搜索{i+1}/{len(penalties)}个点)")
+                            print(f"✓ 找到足够好的结果，提前结束搜索")
                             break
+                    else:
+                        # 不是最优但也显示进度
+                        if i % 2 == 0:  # 每隔一个显示
+                            print(f"  [{i+1}/{len(penalties)}] {n_segments}个钢卷 (penalty={penalty:.2f}, score={segment_score:.3f})")
                         
                 except:
                     continue
@@ -2879,18 +3122,27 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 基本用法（自动检测钢卷边界）
+  # 基本用法（使用波谷检测法自动识别，推荐）
   python coil_wear_analysis.py --roi_dir data/roi_imgs --output_dir data/analysis
   
-  # 指定分析名称
-  python coil_wear_analysis.py --roi_dir data/roi_imgs --output_dir data/analysis --name "第一周期"
+  # ⚡ 最快模式：直接指定钢卷数（速度快10倍）
+  python coil_wear_analysis.py --roi_dir data/roi_imgs --output_dir data/analysis \
+    --n_coils 8 --name "视频1"
+  
+  # 使用Pelt算法检测（更精确但较慢）
+  python coil_wear_analysis.py --roi_dir data/roi_imgs --output_dir data/analysis \
+    --detection_method pelt --name "第一周期"
   
   # 自定义可视化采样间隔
   python coil_wear_analysis.py --roi_dir data/roi_imgs --output_dir data/analysis \
     --diagnosis_interval 50 --marker_interval 50
   
-  # 处理多个视频
-  python coil_wear_analysis.py --roi_dir video1/roi_imgs --output_dir video1/analysis --name "视频1"
+  # 组合使用：波谷检测+自定义参数
+  python coil_wear_analysis.py --roi_dir data/roi_imgs --output_dir data/analysis \
+    --detection_method valley --min_coils 6 --max_coils 12 --name "视频2"
+  
+  # 批量处理
+  python coil_wear_analysis.py --roi_dir video1/roi_imgs --output_dir video1/analysis --n_coils 8 --name "视频1"
   python coil_wear_analysis.py --roi_dir video2/roi_imgs --output_dir video2/analysis --name "视频2"
         """
     )
@@ -2898,8 +3150,12 @@ def main():
     parser.add_argument('--roi_dir', required=True, help='ROI图像目录路径')
     parser.add_argument('--output_dir', required=True, help='输出目录路径')
     parser.add_argument('--name', default='视频分析', help='分析名称 (默认: 视频分析)')
-    parser.add_argument('--min_coils', type=int, default=5, help='最小钢卷数 (默认: 5)')
-    parser.add_argument('--max_coils', type=int, default=15, help='最大钢卷数 (默认: 15)')
+    parser.add_argument('--min_coils', type=int, default=5, help='最小钢卷数，自动检测时使用 (默认: 5)')
+    parser.add_argument('--max_coils', type=int, default=15, help='最大钢卷数，自动检测时使用 (默认: 15)')
+    parser.add_argument('--n_coils', type=int, default=None,
+                       help='⚡ 快速模式：直接指定钢卷数量，跳过自动检测（速度快10倍）')
+    parser.add_argument('--detection_method', type=str, default='valley', choices=['valley', 'pelt'],
+                       help='自动检测方法：valley=波谷检测法（推荐，快速）, pelt=Pelt变化点检测（慢但精确）（默认valley）')
     parser.add_argument('--diagnosis_interval', type=int, default=100, 
                        help='帧诊断图采样间隔，每隔多少帧生成一次诊断图（默认100）')
     parser.add_argument('--marker_interval', type=int, default=100,
@@ -2920,7 +3176,9 @@ def main():
         min_coils=args.min_coils,
         max_coils=args.max_coils,
         diagnosis_interval=args.diagnosis_interval,
-        marker_interval=args.marker_interval
+        marker_interval=args.marker_interval,
+        n_coils=args.n_coils,
+        detection_method=args.detection_method
     )
     
     # 提取特征
