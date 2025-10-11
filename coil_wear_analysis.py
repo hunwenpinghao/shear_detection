@@ -54,7 +54,8 @@ class UniversalWearAnalyzer:
     """通用的磨损分析器"""
     
     def __init__(self, roi_dir: str, output_dir: str, analysis_name: str = "视频分析", 
-                 min_coils: int = 5, max_coils: int = 15):
+                 min_coils: int = 5, max_coils: int = 15,
+                 diagnosis_interval: int = 100, marker_interval: int = 100):
         """
         初始化分析器
         
@@ -64,12 +65,16 @@ class UniversalWearAnalyzer:
             analysis_name: 分析名称
             min_coils: 最小钢卷数
             max_coils: 最大钢卷数
+            diagnosis_interval: 帧诊断图采样间隔（默认100）
+            marker_interval: 白斑标注图采样间隔（默认100）
         """
         self.roi_dir = os.path.abspath(roi_dir)
         self.output_dir = os.path.abspath(output_dir)
         self.analysis_name = analysis_name
         self.min_coils = min_coils
         self.max_coils = max_coils
+        self.diagnosis_interval = diagnosis_interval
+        self.marker_interval = marker_interval
         
         # 创建输出目录
         ensure_dir(output_dir)
@@ -97,9 +102,10 @@ class UniversalWearAnalyzer:
         提取所有帧的特征
         
         Args:
-            save_diagnosis: 是否保存帧诊断图（前10帧和每100帧）
+            save_diagnosis: 是否保存帧诊断图（按采样间隔）
         """
         print(f"\n开始提取{self.analysis_name}的特征...")
+        print(f"诊断图采样间隔: 每 {self.diagnosis_interval} 帧")
         
         # 扫描实际存在的ROI文件
         roi_files = sorted(glob.glob(os.path.join(self.roi_dir, "frame_*_roi.png")))
@@ -109,6 +115,7 @@ class UniversalWearAnalyzer:
         if save_diagnosis:
             diagnosis_dir = os.path.join(self.output_dir, 'visualizations', 'frame_diagnosis')
             ensure_dir(diagnosis_dir)
+            diagnosis_count = 0
         
         all_features = []
         read_fail_count = 0
@@ -149,12 +156,13 @@ class UniversalWearAnalyzer:
                         print(f"\n警告: 特征提取失败 frame {frame_id}: {e}")
                     continue
                 
-                # 保存诊断图（前10个文件和每100个文件）
-                if save_diagnosis and (idx < 10 or idx % 100 == 0):
+                # 保存诊断图（按采样间隔）
+                if save_diagnosis and idx % self.diagnosis_interval == 0:
                     diagnosis_path = os.path.join(diagnosis_dir, f"frame_{frame_id:06d}_diagnosis.png")
                     self.visualizer.visualize_single_frame_diagnosis(
                         image, preprocessed, features, frame_id, diagnosis_path
                     )
+                    diagnosis_count += 1
                 
             except Exception as e:
                 print(f"\n警告: 处理文件 {filepath} 时出错: {e}")
@@ -167,6 +175,8 @@ class UniversalWearAnalyzer:
         print(f"  读取失败: {read_fail_count} 帧")
         print(f"  预处理失败: {preprocess_fail_count} 帧")
         print(f"  特征提取失败: {extract_fail_count} 帧")
+        if save_diagnosis:
+            print(f"  已保存诊断图: {diagnosis_count} 张（采样间隔: {self.diagnosis_interval}）")
         
         if len(all_features) == 0:
             raise RuntimeError("没有成功提取任何特征")
@@ -531,6 +541,15 @@ class UniversalWearAnalyzer:
         
         # 生成撕裂面白斑分析
         self._plot_white_patch_analysis(df, os.path.join(viz_dir, 'white_patch_analysis.png'))
+        
+        # 生成白斑标注图（带直方图）
+        self._generate_white_patch_markers(df, viz_dir, sample_interval=self.marker_interval)
+        
+        # 生成白斑时序曲线（8×4完整版）
+        self._plot_white_patch_temporal_curves(df, os.path.join(viz_dir, 'white_patch_temporal_curves_4x8.png'))
+        
+        # 生成白斑方法推荐报告
+        self._generate_white_patch_recommendation(df, viz_dir)
         
         print("✓ 额外分析图生成完成")
         
@@ -2323,6 +2342,352 @@ class UniversalWearAnalyzer:
         plt.close()
         print(f"已保存: {save_path}")
     
+    def _extract_left_region_and_mask(self, image: np.ndarray):
+        """提取左侧撕裂面区域及掩码"""
+        height, width = image.shape
+        
+        # 找白色区域中最暗点作为分界线
+        mask_white = image > 100
+        centerline_x = []
+        
+        for y in range(height):
+            row = image[y, :]
+            white_indices = np.where(mask_white[y, :])[0]
+            
+            if len(white_indices) > 10:
+                search_start = white_indices[0] + 5
+                search_end = white_indices[-1] - 5
+                
+                if search_end > search_start:
+                    min_idx = search_start + np.argmin(row[search_start:search_end])
+                    centerline_x.append(min_idx)
+                else:
+                    centerline_x.append((white_indices[0] + white_indices[-1]) // 2)
+            else:
+                centerline_x.append(width // 2)
+        
+        # 平滑中心线
+        if len(centerline_x) > 51:
+            from scipy.signal import savgol_filter
+            centerline_x = savgol_filter(centerline_x, 51, 3)
+        centerline_x = np.array(centerline_x, dtype=int)
+        
+        # 创建左侧掩码
+        left_mask = np.zeros_like(image, dtype=np.uint8)
+        for y in range(height):
+            if y < len(centerline_x):
+                left_mask[y, :centerline_x[y]] = 255
+        
+        left_region = cv2.bitwise_and(image, image, mask=left_mask)
+        return left_region, left_mask
+    
+    def _detect_white_patches_methods(self, image: np.ndarray, mask: np.ndarray):
+        """使用4种方法检测白斑，返回4个二值图"""
+        # 方法1：固定阈值
+        _, binary1 = cv2.threshold(image, 200, 255, cv2.THRESH_BINARY)
+        binary1 = cv2.bitwise_and(binary1, binary1, mask=mask)
+        
+        # 方法2：Otsu + 最小阈值约束
+        masked_pixels = image[mask > 0]
+        if len(masked_pixels) > 0:
+            otsu_threshold, _ = cv2.threshold(masked_pixels, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            threshold2 = max(otsu_threshold, 170)
+            _, binary2 = cv2.threshold(image, threshold2, 255, cv2.THRESH_BINARY)
+            binary2 = cv2.bitwise_and(binary2, binary2, mask=mask)
+        else:
+            binary2 = np.zeros_like(image)
+        
+        # 方法3：相对亮度法
+        if len(masked_pixels) > 0:
+            mean_val = np.mean(masked_pixels)
+            std_val = np.std(masked_pixels)
+            threshold3 = mean_val + 1.5 * std_val
+            _, binary3 = cv2.threshold(image, threshold3, 255, cv2.THRESH_BINARY)
+            binary3 = cv2.bitwise_and(binary3, binary3, mask=mask)
+        else:
+            binary3 = np.zeros_like(image)
+        
+        # 方法4：Top-Hat
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        tophat = cv2.morphologyEx(image, cv2.MORPH_TOPHAT, kernel)
+        tophat_masked = tophat[mask > 0]
+        if len(tophat_masked) > 0 and tophat_masked.max() > 0:
+            threshold4, _ = cv2.threshold(tophat_masked, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            _, binary4 = cv2.threshold(tophat, max(threshold4, 1), 255, cv2.THRESH_BINARY)
+            binary4 = cv2.bitwise_and(binary4, binary4, mask=mask)
+        else:
+            binary4 = np.zeros_like(image)
+        
+        return [binary1, binary2, binary3, binary4]
+    
+    def _generate_white_patch_markers(self, df: pd.DataFrame, viz_dir: str, sample_interval: int = 100):
+        """生成白斑标注图（带直方图对比）"""
+        print(f"\n生成白斑标注图（每隔{sample_interval}帧）...")
+        
+        # 检查是否有白斑特征
+        if 'white_area_ratio_m1' not in df.columns:
+            print("  警告: 数据中没有白斑特征，跳过")
+            return
+        
+        # 创建输出目录
+        markers_dir = os.path.join(viz_dir, 'white_patch_markers')
+        ensure_dir(markers_dir)
+        
+        # 选择要可视化的帧
+        sample_indices = list(range(0, len(df), sample_interval))
+        method_names_display = ['固定阈值', 'Otsu自适应', '相对亮度', '形态学Top-Hat']
+        
+        for sample_idx in tqdm(sample_indices[:20], desc="生成标注图"):  # 最多20张避免太多
+            try:
+                frame_id = int(df.iloc[sample_idx]['frame_id'])
+                
+                # 读取原图
+                filepath = os.path.join(self.roi_dir, f'frame_{frame_id:06d}_roi.png')
+                image = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
+                if image is None:
+                    continue
+                
+                # 提取左侧区域
+                left_region, left_mask = self._extract_left_region_and_mask(image)
+                
+                # 4种方法检测
+                binaries = self._detect_white_patches_methods(left_region, left_mask)
+                
+                # 创建3x2布局
+                fig = plt.figure(figsize=(18, 24))
+                gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
+                
+                all_areas = []
+                
+                # 前4个子图：标注
+                for method_idx, (binary, display_name) in enumerate(zip(binaries, method_names_display)):
+                    row = method_idx // 2
+                    col = method_idx % 2
+                    ax = fig.add_subplot(gs[row, col])
+                    
+                    display_img = cv2.cvtColor(left_region, cv2.COLOR_GRAY2RGB)
+                    
+                    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+                    
+                    valid_patches = 0
+                    patch_areas = []
+                    
+                    for i in range(1, num_labels):
+                        area = stats[i, cv2.CC_STAT_AREA]
+                        if area < 5:
+                            continue
+                        
+                        valid_patches += 1
+                        patch_areas.append(area)
+                        
+                        cx, cy = int(centroids[i][0]), int(centroids[i][1])
+                        radius = max(3, min(int(np.sqrt(area) * 0.5), 10))
+                        cv2.circle(display_img, (cx, cy), radius, (255, 0, 0), 2)
+                        cv2.circle(display_img, (cx, cy), 1, (0, 255, 0), -1)
+                    
+                    all_areas.append(patch_areas)
+                    
+                    ax.imshow(display_img)
+                    ax.set_title(f'{display_name}\n帧{frame_id} - 检测到{valid_patches}个白斑', 
+                               fontsize=14, fontweight='bold')
+                    ax.axis('off')
+                    
+                    ax.text(0.02, 0.98, f'白斑数: {valid_patches}', 
+                           transform=ax.transAxes, fontsize=12, 
+                           verticalalignment='top', fontweight='bold',
+                           bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
+                
+                # 第5个子图：亮度直方图
+                ax_brightness = fig.add_subplot(gs[2, 0])
+                tear_pixels = left_region[left_mask > 0]
+                if len(tear_pixels) > 0:
+                    ax_brightness.hist(tear_pixels, bins=50, color='gray', alpha=0.5, 
+                                      label='撕裂面整体亮度', edgecolor='black', linewidth=0.5)
+                    
+                    colors_hist = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+                    for idx, binary in enumerate(binaries):
+                        white_pixels = left_region[binary > 0]
+                        if len(white_pixels) > 0:
+                            ax_brightness.hist(white_pixels, bins=50, color=colors_hist[idx], 
+                                             alpha=0.3, label=f'方法{idx+1}白斑', 
+                                             edgecolor=colors_hist[idx], linewidth=1)
+                
+                ax_brightness.set_xlabel('亮度值', fontsize=12, fontweight='bold')
+                ax_brightness.set_ylabel('像素数量', fontsize=12, fontweight='bold')
+                ax_brightness.set_title(f'撕裂面亮度分布对比\n帧{frame_id}', fontsize=14, fontweight='bold')
+                ax_brightness.legend(fontsize=10, loc='best')
+                ax_brightness.grid(True, alpha=0.3, axis='y')
+                
+                # 第6个子图：斑块面积直方图
+                ax_area = fig.add_subplot(gs[2, 1])
+                colors_hist = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+                for idx, areas in enumerate(all_areas):
+                    if len(areas) > 0:
+                        ax_area.hist(areas, bins=20, color=colors_hist[idx], alpha=0.5,
+                                   label=f'方法{idx+1} ({len(areas)}个)',
+                                   edgecolor=colors_hist[idx], linewidth=1)
+                
+                ax_area.set_xlabel('斑块面积 (像素数)', fontsize=12, fontweight='bold')
+                ax_area.set_ylabel('斑块数量', fontsize=12, fontweight='bold')
+                ax_area.set_title(f'白斑面积分布对比\n帧{frame_id}', fontsize=14, fontweight='bold')
+                ax_area.legend(fontsize=10, loc='best')
+                ax_area.grid(True, alpha=0.3, axis='y')
+                
+                plt.suptitle(f'{self.analysis_name} - 撕裂面白斑综合分析 - 帧{frame_id}\n（上：标注图，下：直方图对比）', 
+                           fontsize=18, fontweight='bold')
+                plt.tight_layout()
+                
+                save_path = os.path.join(markers_dir, f'frame_{frame_id:06d}_markers.png')
+                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                plt.close()
+                
+            except Exception as e:
+                print(f"\n  处理帧{sample_idx}时出错: {e}")
+                continue
+        
+        print(f"  已保存标注图到: {markers_dir}")
+    
+    def _plot_white_patch_temporal_curves(self, df: pd.DataFrame, save_path: str):
+        """绘制白斑时序曲线（8×4完整版）"""
+        print("\n生成白斑时序曲线（8×4）...")
+        
+        # 检查是否有白斑特征
+        if 'white_area_ratio_m1' not in df.columns:
+            print("  警告: 数据中没有白斑特征，跳过")
+            return
+        
+        fig, axes = plt.subplots(8, 4, figsize=(20, 32))
+        
+        methods = ['m1', 'm2', 'm3', 'm4']
+        method_names = ['固定阈值', 'Otsu自适应', '相对亮度', '形态学Top-Hat']
+        metrics = ['area_ratio', 'patch_count', 'avg_brightness', 'brightness_std', 
+                  'avg_patch_area', 'composite_index', 'brightness_entropy', 'patch_area_entropy']
+        metric_names = ['白斑面积占比(%)', '白斑数量(个)', '平均亮度', '亮度标准差', 
+                       '单个白斑平均面积(%)', '综合指标(数量+std)', '亮度直方图熵', '斑块面积分布熵']
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+        
+        for row_idx, metric in enumerate(metrics):
+            for col_idx, (method, method_name, color) in enumerate(zip(methods, method_names, colors)):
+                ax = axes[row_idx, col_idx]
+                
+                col_name = f'white_{metric}_{method}'
+                if col_name not in df.columns:
+                    continue
+                
+                values = df[col_name].values
+                frames = df['frame_id'].values
+                
+                # 原始数据
+                ax.plot(frames, values, '-', alpha=0.3, color=color, linewidth=0.5)
+                
+                # 平滑曲线
+                window = min(51, len(values)//10*2+1)
+                if window >= 5:
+                    smoothed = savgol_filter(values, window_length=window, polyorder=3)
+                    ax.plot(frames, smoothed, '-', color=color, linewidth=2.5, label='平滑曲线')
+                
+                # 线性趋势
+                z = np.polyfit(frames, values, 1)
+                trend = np.poly1d(z)
+                ax.plot(frames, trend(frames), '--', color='red', linewidth=2, alpha=0.7, 
+                       label=f'趋势(斜率={z[0]:.2e})')
+                
+                ax.set_xlabel('帧编号', fontsize=10)
+                ax.set_ylabel(metric_names[row_idx], fontsize=10)
+                ax.set_title(f'{method_name} - {metric_names[row_idx]}', fontsize=11, fontweight='bold')
+                ax.legend(fontsize=8)
+                ax.grid(True, alpha=0.3)
+        
+        plt.suptitle(f'{self.analysis_name} - 撕裂面白斑特征时序演变（4方法×8指标）', 
+                    fontsize=18, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  已保存: {save_path}")
+    
+    def _generate_white_patch_recommendation(self, df: pd.DataFrame, viz_dir: str):
+        """生成白斑方法推荐报告"""
+        print("\n生成白斑方法推荐报告...")
+        
+        # 检查是否有白斑特征
+        if 'white_area_ratio_m1' not in df.columns:
+            print("  警告: 数据中没有白斑特征，跳过")
+            return
+        
+        from scipy.stats import spearmanr
+        
+        report_lines = []
+        report_lines.append(f"# {self.analysis_name} - 撕裂面白斑检测方法推荐报告\n\n")
+        
+        methods = ['m1', 'm2', 'm3', 'm4']
+        method_names = ['方法1:固定阈值法', '方法2:Otsu自适应法', '方法3:相对亮度法', '方法4:形态学Top-Hat法']
+        metrics = ['area_ratio', 'patch_count']
+        
+        report_lines.append("## 方法评估\n\n")
+        report_lines.append("评估维度：\n")
+        report_lines.append("1. **单调性**：与帧序号的Spearman相关系数（反映是否随磨损递增）\n")
+        report_lines.append("2. **稳定性**：变异系数CV（标准差/均值，越小越稳定）\n")
+        report_lines.append("3. **灵敏度**：数值变化范围\n\n")
+        
+        evaluation_results = []
+        
+        for method, method_name in zip(methods, method_names):
+            report_lines.append(f"### {method_name}\n\n")
+            
+            for metric in metrics:
+                col_name = f'white_{metric}_{method}'
+                if col_name not in df.columns:
+                    continue
+                
+                values = df[col_name].values
+                frames = df['frame_id'].values
+                
+                corr, pval = spearmanr(frames, values)
+                mean_val = np.mean(values)
+                std_val = np.std(values)
+                cv = std_val / mean_val if mean_val > 0 else 0
+                value_range = np.max(values) - np.min(values)
+                
+                metric_cn = '面积占比' if metric == 'area_ratio' else '斑块数量'
+                
+                report_lines.append(f"**指标: {metric_cn}**\n")
+                report_lines.append(f"- 单调性（Spearman相关系数）: {corr:.4f} (p-value={pval:.4e})\n")
+                report_lines.append(f"- 稳定性（变异系数CV）: {cv:.4f}\n")
+                report_lines.append(f"- 灵敏度（数值范围）: {value_range:.2f}\n")
+                report_lines.append(f"- 均值: {mean_val:.2f}, 标准差: {std_val:.2f}\n\n")
+                
+                evaluation_results.append({
+                    'method': method_name,
+                    'metric': metric_cn,
+                    'monotonicity': abs(corr),
+                    'stability': 1/(cv+0.01),
+                    'sensitivity': value_range
+                })
+        
+        # 综合推荐
+        report_lines.append("## 综合推荐\n\n")
+        
+        if len(evaluation_results) > 0:
+            eval_df = pd.DataFrame(evaluation_results)
+            eval_df['综合得分'] = eval_df['monotonicity'] * 0.5 + eval_df['stability'] * 0.01 + eval_df['sensitivity'] * 0.001
+            
+            best_method = eval_df.loc[eval_df['综合得分'].idxmax()]
+            
+            report_lines.append(f"**推荐方法**: {best_method['method']}\n")
+            report_lines.append(f"**推荐指标**: {best_method['metric']}\n")
+            report_lines.append(f"**综合得分**: {best_method['综合得分']:.4f}\n\n")
+            
+            report_lines.append("**说明**:\n")
+            report_lines.append("- 该方法在单调性、稳定性和灵敏度方面取得了最佳平衡\n")
+            report_lines.append("- 建议在后续分析中使用该方法作为主要指标\n")
+        
+        # 保存报告
+        report_path = os.path.join(viz_dir, 'white_patch_recommendation.md')
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.writelines(report_lines)
+        
+        print(f"  已保存: {report_path}")
+    
     def _generate_report(self, df, key_features, n_coils, analysis_results=None):
         """生成分析报告"""
         print(f"\n{'='*80}")
@@ -2520,6 +2885,10 @@ def main():
   # 指定分析名称
   python coil_wear_analysis.py --roi_dir data/roi_imgs --output_dir data/analysis --name "第一周期"
   
+  # 自定义可视化采样间隔
+  python coil_wear_analysis.py --roi_dir data/roi_imgs --output_dir data/analysis \
+    --diagnosis_interval 50 --marker_interval 50
+  
   # 处理多个视频
   python coil_wear_analysis.py --roi_dir video1/roi_imgs --output_dir video1/analysis --name "视频1"
   python coil_wear_analysis.py --roi_dir video2/roi_imgs --output_dir video2/analysis --name "视频2"
@@ -2531,6 +2900,10 @@ def main():
     parser.add_argument('--name', default='视频分析', help='分析名称 (默认: 视频分析)')
     parser.add_argument('--min_coils', type=int, default=5, help='最小钢卷数 (默认: 5)')
     parser.add_argument('--max_coils', type=int, default=15, help='最大钢卷数 (默认: 15)')
+    parser.add_argument('--diagnosis_interval', type=int, default=100, 
+                       help='帧诊断图采样间隔，每隔多少帧生成一次诊断图（默认100）')
+    parser.add_argument('--marker_interval', type=int, default=100,
+                       help='白斑标注图采样间隔，每隔多少帧生成一次标注图（默认100，最多20张）')
     
     args = parser.parse_args()
     
@@ -2545,7 +2918,9 @@ def main():
         output_dir=args.output_dir,
         analysis_name=args.name,
         min_coils=args.min_coils,
-        max_coils=args.max_coils
+        max_coils=args.max_coils,
+        diagnosis_interval=args.diagnosis_interval,
+        marker_interval=args.marker_interval
     )
     
     # 提取特征

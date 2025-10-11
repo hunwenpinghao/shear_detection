@@ -208,11 +208,17 @@ class TearTextureEntropyAnalyzer:
         except (IndexError, ValueError):
             return -1
     
-    def process_existing_data(self, roi_dir, output_dir):
-        """处理现有数据（跳过第一步和第二步）"""
+    def process_existing_data(self, roi_dir, output_dir, visualization_interval=100):
+        """处理现有数据（跳过第一步和第二步）
         
+        Args:
+            roi_dir: ROI图像目录
+            output_dir: 输出目录
+            visualization_interval: 可视化采样间隔（此脚本不生成中间可视化，参数保留以保持API一致性）
+        """
         print("开始分析撕裂面纹理熵...")
         print("=" * 60)
+        print(f"注意: 此脚本不生成中间可视化，visualization_interval参数未使用")
         
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
@@ -450,23 +456,40 @@ class TearTextureEntropyAnalyzer:
 
 def main():
     """主函数"""
-    import sys
+    import argparse
     
-    # 设置路径
-    roi_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs"
-    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_texture_density_curve"
+    parser = argparse.ArgumentParser(
+        description='撕裂面纹理熵分析工具',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 基本用法
+  python tear_texture_entropy_analyzer.py --roi_dir data/roi_imgs --output_dir data_texture_density_curve
+  
+  # 注意: 此脚本不生成中间可视化，--viz_interval参数保留以保持API一致性
+        """
+    )
     
-    if len(sys.argv) > 1:
-        roi_dir = sys.argv[1]
+    parser.add_argument('--roi_dir', type=str,
+                       default="/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs",
+                       help='ROI图像目录路径')
+    parser.add_argument('--output_dir', type=str,
+                       default="/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_texture_density_curve",
+                       help='输出目录路径')
+    parser.add_argument('--viz_interval', type=int, default=100,
+                       help='可视化采样间隔（此脚本不使用，参数保留以保持API一致性）')
     
-    if len(sys.argv) > 2:
-        output_dir = sys.argv[2]
+    args = parser.parse_args()
 
     # 创建分析器
     analyzer = TearTextureEntropyAnalyzer()
     
     # 处理现有数据（跳过第一步和第二步）
-    analyzer.process_existing_data(roi_dir, output_dir)
+    analyzer.process_existing_data(
+        roi_dir=args.roi_dir,
+        output_dir=args.output_dir,
+        visualization_interval=args.viz_interval
+    )
 
 if __name__ == "__main__":
     main()

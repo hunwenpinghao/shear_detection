@@ -326,10 +326,18 @@ class AdagausDensityAnalyzer:
         except (IndexError, ValueError):
             return -1
     
-    def process_images(self, roi_dir, output_dir, use_contour_method=True):
-        """按步骤处理所有ROI，生成并统计 Filtered Adaptive Gaussian。"""
+    def process_images(self, roi_dir, output_dir, use_contour_method=True, visualization_interval=100):
+        """按步骤处理所有ROI，生成并统计 Filtered Adaptive Gaussian。
+        
+        Args:
+            roi_dir: ROI图像目录
+            output_dir: 输出目录
+            use_contour_method: 是否使用等高线方法生成撕裂面mask
+            visualization_interval: 可视化采样间隔，每隔多少帧生成一次可视化图像（默认100）
+        """
         print("开始分析 Filtered Adaptive Gaussian 二值图密度...")
         print("=" * 60)
+        print(f"可视化采样间隔: 每 {visualization_interval} 帧")
         
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
@@ -359,14 +367,19 @@ class AdagausDensityAnalyzer:
             from shear_tear_detector import ShearTearDetector
             detector = ShearTearDetector(use_contour_method=True)
         
-        # 第一步：生成撕裂面mask
+        # 第一步：生成撕裂面mask（所有帧都计算，仅采样保存）
         print("\n第一步：生成撕裂面mask...")
-        for image_path in tqdm(image_files, desc="生成撕裂面mask", unit="图像"):
+        step1_count = 0
+        mask_cache = {}  # 缓存所有帧的mask供后续步骤使用
+        
+        for idx, image_path in enumerate(tqdm(image_files, desc="生成撕裂面mask", unit="图像")):
             gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if gray is None:
                 continue
-                
-            # 根据方法选择不同的mask生成方式
+            
+            frame_num = self.extract_frame_info(image_path)
+            
+            # 所有帧都计算mask
             if use_contour_method:
                 # 新方法：使用等高线方法生成撕裂面mask
                 result = detector.detect_surfaces(gray, visualize=False)
@@ -385,86 +398,109 @@ class AdagausDensityAnalyzer:
                 # 老方法：使用原始方法
                 final_mask = self.extractor._compute_final_filled_mask(gray)
             
-            frame_num = self.extract_frame_info(image_path)
+            # 缓存mask供后续步骤使用
+            mask_cache[frame_num] = final_mask
             
-            # 保存撕裂面mask
-            mask_filename = f"tear_mask_frame_{frame_num:06d}.png"
-            mask_path = os.path.join(step1_dir, mask_filename)
-            cv2.imwrite(mask_path, final_mask)
+            # 只对采样帧保存mask（用于可视化检查）
+            if idx % visualization_interval == 0:
+                mask_filename = f"tear_mask_frame_{frame_num:06d}.png"
+                mask_path = os.path.join(step1_dir, mask_filename)
+                cv2.imwrite(mask_path, final_mask)
+                step1_count += 1
         
         print(f"第一步完成，撕裂面mask已保存到: {step1_dir}")
+        print(f"  - 共计算 {len(mask_cache)} 个撕裂面mask（所有帧）")
+        print(f"  - 共保存 {step1_count} 个可视化mask（采样间隔: {visualization_interval}）")
         
-        # 第二步：生成原始Adagaus二值图
+        # 第二步：生成原始Adagaus二值图（所有帧都计算，仅采样保存）
         print("\n第二步：生成原始Adagaus二值图...")
-        for image_path in tqdm(image_files, desc="生成原始Adagaus二值图", unit="图像"):
+        step2_count = 0
+        adagaus_cache = {}  # 缓存所有帧的Adagaus二值图
+        
+        for idx, image_path in enumerate(tqdm(image_files, desc="生成原始Adagaus二值图", unit="图像")):
             gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if gray is None:
                 continue
-                
+            
             frame_num = self.extract_frame_info(image_path)
             
-            # 生成原始Adagaus二值图
+            # 所有帧都生成Adagaus二值图
             adagaus = self.extractor._adaptive_gaussian_binary(gray)
+            adagaus_cache[frame_num] = adagaus
             
-            # 保存原始Adagaus二值图
-            adagaus_filename = f"original_adagaus_frame_{frame_num:06d}.png"
-            adagaus_path = os.path.join(step2_dir, adagaus_filename)
-            cv2.imwrite(adagaus_path, adagaus)
+            # 只对采样帧保存二值图（用于可视化检查）
+            if idx % visualization_interval == 0:
+                adagaus_filename = f"original_adagaus_frame_{frame_num:06d}.png"
+                adagaus_path = os.path.join(step2_dir, adagaus_filename)
+                cv2.imwrite(adagaus_path, adagaus)
+                step2_count += 1
         
         print(f"第二步完成，原始Adagaus二值图已保存到: {step2_dir}")
+        print(f"  - 共计算 {len(adagaus_cache)} 个Adagaus二值图（所有帧）")
+        print(f"  - 共保存 {step2_count} 个可视化二值图（采样间隔: {visualization_interval}）")
         
-        # 第三步：根据撕裂面mask过滤二值图并生成最终结果
+        # 第三步：根据撕裂面mask过滤二值图并分析（所有帧都计算，仅采样保存可视化）
         print("\n第三步：根据撕裂面mask过滤二值图...")
-        for image_path in tqdm(image_files, desc="过滤二值图并生成结果", unit="图像"):
+        visualization_count = 0
+        
+        for idx, image_path in enumerate(tqdm(image_files, desc="过滤二值图并生成结果", unit="图像")):
             gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if gray is None:
                 continue
-                
-            # 根据方法选择不同的mask生成方式
-            if use_contour_method:
-                # 新方法：使用等高线方法生成撕裂面mask
-                result = detector.detect_surfaces(gray, visualize=False)
-                if result and 'intermediate_results' in result:
-                    tear_mask = result['intermediate_results'].get('tear_mask', None)
-                    if tear_mask is not None:
-                        # 使用等高线方法生成的撕裂面mask
-                        final_mask = tear_mask.astype(np.uint8) * 255
+            
+            frame_num = self.extract_frame_info(image_path)
+            
+            # 从缓存中获取mask和adagaus（如果有），否则重新计算
+            if frame_num in mask_cache:
+                final_mask = mask_cache[frame_num]
+            else:
+                # 重新计算mask
+                if use_contour_method:
+                    result = detector.detect_surfaces(gray, visualize=False)
+                    if result and 'intermediate_results' in result:
+                        tear_mask = result['intermediate_results'].get('tear_mask', None)
+                        if tear_mask is not None:
+                            final_mask = tear_mask.astype(np.uint8) * 255
+                        else:
+                            final_mask = self.extractor._compute_final_filled_mask(gray)
                     else:
-                        # 回退到原始方法
                         final_mask = self.extractor._compute_final_filled_mask(gray)
                 else:
-                    # 回退到原始方法
                     final_mask = self.extractor._compute_final_filled_mask(gray)
-            else:
-                # 老方法：使用原始方法
-                final_mask = self.extractor._compute_final_filled_mask(gray)
             
-            # 生成原始Adagaus二值图
-            adagaus = self.extractor._adaptive_gaussian_binary(gray)
+            # 从缓存获取或重新生成Adagaus二值图
+            if frame_num in adagaus_cache:
+                adagaus = adagaus_cache[frame_num]
+            else:
+                adagaus = self.extractor._adaptive_gaussian_binary(gray)
             
             # 使用撕裂面mask过滤二值图
             filtered = adagaus.copy()
             filtered[final_mask == 0] = 0
+            
+            # 根据采样间隔保存过滤后的二值图和可视化图像
+            if idx % visualization_interval == 0:
+                # 保存过滤后的二值图
+                filtered_filename = f"filtered_adagaus_frame_{frame_num:06d}.png"
+                filtered_path = os.path.join(step3_dir, filtered_filename)
+                cv2.imwrite(filtered_path, filtered)
                 
-            frame_num = self.extract_frame_info(image_path)
+                # 生成并保存可视化图像
+                filtered_visualization = self.create_burr_visualization(gray, filtered)
+                viz_filename = f"filtered_adagaus_visualization_frame_{frame_num:06d}.png"
+                viz_path = os.path.join(step3_dir, viz_filename)
+                cv2.imwrite(viz_path, filtered_visualization)
+                visualization_count += 1
             
-            # 保存过滤后的二值图
-            filtered_filename = f"filtered_adagaus_frame_{frame_num:06d}.png"
-            filtered_path = os.path.join(step3_dir, filtered_filename)
-            cv2.imwrite(filtered_path, filtered)
-            
-            # 生成过滤后的可视化图像
-            filtered_visualization = self.create_burr_visualization(gray, filtered)
-            viz_filename = f"filtered_adagaus_visualization_frame_{frame_num:06d}.png"
-            viz_path = os.path.join(step3_dir, viz_filename)
-            cv2.imwrite(viz_path, filtered_visualization)
-            
-            # 分析密度
+            # 所有帧都执行密度分析
             analysis_result = self.analyze_adagaus_density(image_path, final_mask, filtered)
             if analysis_result:
                 self.results.append(analysis_result)
         
         print(f"第三步完成，过滤后的二值图已保存到: {step3_dir}")
+        print(f"  - 共生成 {visualization_count} 个过滤后的二值图（采样间隔: {visualization_interval}）")
+        print(f"  - 共生成 {visualization_count} 张可视化图像（采样间隔: {visualization_interval}）")
+        print(f"  - 所有 {len(image_files)} 帧的数值分析已完成")
         
         self.save_results(output_dir)
         self.create_visualizations(output_dir)
@@ -713,23 +749,47 @@ class AdagausDensityAnalyzer:
 
 def main():
     """主函数"""
-    import sys
+    import argparse
     
-    # 默认路径（可通过命令行参数覆盖）
-    roi_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs"
-    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_adagaus_density_curve"
+    parser = argparse.ArgumentParser(
+        description='Filtered Adaptive Gaussian 二值图密度分析工具',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 基本用法
+  python adagaus_density_analyzer.py --roi_dir data/roi_imgs --output_dir data_adagaus_density_curve
+  
+  # 指定可视化采样间隔
+  python adagaus_density_analyzer.py --roi_dir data/roi_imgs --output_dir data_adagaus_density_curve --viz_interval 50
+  
+  # 使用原始方法（不使用等高线方法）
+  python adagaus_density_analyzer.py --roi_dir data/roi_imgs --output_dir data_adagaus_density_curve --no_contour_method
+        """
+    )
     
-    if len(sys.argv) > 1:
-        roi_dir = sys.argv[1]
+    parser.add_argument('--roi_dir', type=str, 
+                       default="/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs",
+                       help='ROI图像目录路径')
+    parser.add_argument('--output_dir', type=str,
+                       default="/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_adagaus_density_curve",
+                       help='输出目录路径')
+    parser.add_argument('--viz_interval', type=int, default=100,
+                       help='可视化采样间隔，每隔多少帧生成一次可视化图像（默认100）')
+    parser.add_argument('--no_contour_method', action='store_true',
+                       help='不使用等高线方法生成撕裂面mask（使用原始方法）')
     
-    if len(sys.argv) > 2:
-        output_dir = sys.argv[2]
+    args = parser.parse_args()
 
     # 创建分析器
     analyzer = AdagausDensityAnalyzer()
     
-    # 处理图像（默认使用新方法）
-    analyzer.process_images(roi_dir, output_dir, use_contour_method=True)
+    # 处理图像
+    analyzer.process_images(
+        roi_dir=args.roi_dir, 
+        output_dir=args.output_dir, 
+        use_contour_method=not args.no_contour_method,
+        visualization_interval=args.viz_interval
+    )
 
 if __name__ == "__main__":
     main()

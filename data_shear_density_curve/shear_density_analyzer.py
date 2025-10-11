@@ -195,11 +195,18 @@ class ShearDensityAnalyzer:
         except (IndexError, ValueError):
             return -1
     
-    def process_images(self, roi_dir, output_dir, use_contour_method=True):
-        """按步骤处理所有图像"""
+    def process_images(self, roi_dir, output_dir, use_contour_method=True, visualization_interval=100):
+        """按步骤处理所有图像
         
+        Args:
+            roi_dir: ROI图像目录
+            output_dir: 输出目录
+            use_contour_method: 是否使用等高线方法生成剪切面mask
+            visualization_interval: 可视化采样间隔，每隔多少帧生成一次可视化图像（默认100）
+        """
         print("开始分析剪切面密度...")
         print("=" * 60)
+        print(f"可视化采样间隔: 每 {visualization_interval} 帧")
         
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
@@ -236,60 +243,67 @@ class ShearDensityAnalyzer:
             # 第一步：生成剪切面mask（before fill + after fill）
             print("\n第一步：生成剪切面mask...")
             detection_results = {}  # 缓存检测结果，避免重复计算
+            step1_count = 0
             
-            for image_path in tqdm(image_files, desc="生成剪切面mask", unit="图像"):
+            for idx, image_path in enumerate(tqdm(image_files, desc="生成剪切面mask", unit="图像")):
                 # 读取图像
                 image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
                 if image is None:
                     continue
-                    
-                # 检测撕裂面和剪切面
+                
+                frame_num = self.extract_frame_info(image_path)
+                
+                # 所有帧都检测撕裂面和剪切面并缓存结果
                 result = detector.detect_surfaces(image, visualize=False)
                 if result and 'segmented_image' in result:
-                    frame_num = self.extract_frame_info(image_path)
-                    
-                    # 缓存检测结果
                     detection_results[frame_num] = result
                     
-                    # 根据使用的方法保存不同的mask
-                    if use_contour_method:
-                        # 新方法：使用等高线方法的结果
-                        if 'shear_mask' in result.get('intermediate_results', {}):
-                            shear_mask = result['intermediate_results']['shear_mask']
-                            # 保存等高线方法生成的剪切面mask
-                            contour_mask = shear_mask.astype(np.uint8) * 255
-                            contour_filename = f"shear_mask_contour_frame_{frame_num:06d}.png"
-                            contour_path = os.path.join(step1_dir, contour_filename)
-                            cv2.imwrite(contour_path, contour_mask)
+                    # 只对采样帧保存mask（用于可视化检查）
+                    if idx % visualization_interval == 0:
+                        # 根据使用的方法保存不同的mask
+                        if use_contour_method:
+                            # 新方法：使用等高线方法的结果
+                            if 'shear_mask' in result.get('intermediate_results', {}):
+                                shear_mask = result['intermediate_results']['shear_mask']
+                                # 保存等高线方法生成的剪切面mask
+                                contour_mask = shear_mask.astype(np.uint8) * 255
+                                contour_filename = f"shear_mask_contour_frame_{frame_num:06d}.png"
+                                contour_path = os.path.join(step1_dir, contour_filename)
+                                cv2.imwrite(contour_path, contour_mask)
+                                
+                                # 同时保存分割结果
+                                segmented_image = result['segmented_image']
+                                after_fill_mask = (segmented_image == 255).astype(np.uint8) * 255  # 剪切面是255
+                                after_fill_filename = f"shear_mask_after_fill_frame_{frame_num:06d}.png"
+                                after_fill_path = os.path.join(step1_dir, after_fill_filename)
+                                cv2.imwrite(after_fill_path, after_fill_mask)
+                        else:
+                            # 老方法：保存before fill和after fill mask
+                            if 'shear_mask_before_fill' in result.get('intermediate_results', {}):
+                                before_fill_mask = result['intermediate_results']['shear_mask_before_fill'].astype(np.uint8) * 255
+                                before_fill_filename = f"shear_mask_before_fill_frame_{frame_num:06d}.png"
+                                before_fill_path = os.path.join(step1_dir, before_fill_filename)
+                                cv2.imwrite(before_fill_path, before_fill_mask)
                             
-                            # 同时保存分割结果
+                            # 保存after fill mask
                             segmented_image = result['segmented_image']
                             after_fill_mask = (segmented_image == 255).astype(np.uint8) * 255  # 剪切面是255
                             after_fill_filename = f"shear_mask_after_fill_frame_{frame_num:06d}.png"
                             after_fill_path = os.path.join(step1_dir, after_fill_filename)
                             cv2.imwrite(after_fill_path, after_fill_mask)
-                    else:
-                        # 老方法：保存before fill和after fill mask
-                        if 'shear_mask_before_fill' in result.get('intermediate_results', {}):
-                            before_fill_mask = result['intermediate_results']['shear_mask_before_fill'].astype(np.uint8) * 255
-                            before_fill_filename = f"shear_mask_before_fill_frame_{frame_num:06d}.png"
-                            before_fill_path = os.path.join(step1_dir, before_fill_filename)
-                            cv2.imwrite(before_fill_path, before_fill_mask)
                         
-                        # 保存after fill mask
-                        segmented_image = result['segmented_image']
-                        after_fill_mask = (segmented_image == 255).astype(np.uint8) * 255  # 剪切面是255
-                        after_fill_filename = f"shear_mask_after_fill_frame_{frame_num:06d}.png"
-                        after_fill_path = os.path.join(step1_dir, after_fill_filename)
-                        cv2.imwrite(after_fill_path, after_fill_mask)
+                        step1_count += 1
             
             print(f"第一步完成，剪切面mask已保存到: {step1_dir}")
+            print(f"  - 共计算 {len(detection_results)} 个剪切面（所有帧）")
+            print(f"  - 共保存 {step1_count} 个可视化mask（采样间隔: {visualization_interval}）")
         
         skip_step2 = True
         if not skip_step2:
             # 第二步：应用剪切面mask过滤出原图的剪切面区域，并提取斑块图
             print("\n第二步：提取剪切面区域和斑块图...")
-            for image_path in tqdm(image_files, desc="提取剪切面区域", unit="图像"):
+            visualization_count = 0
+            for idx, image_path in enumerate(tqdm(image_files, desc="提取剪切面区域", unit="图像")):
                 # 读取图像
                 image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
                 if image is None:
@@ -343,16 +357,18 @@ class ShearDensityAnalyzer:
                 # 应用mask过滤出剪切面区域
                 shear_region = cv2.bitwise_and(image, image, mask=shear_mask)
                 
-                # 保存剪切面区域
-                region_filename = f"shear_region_frame_{frame_num:06d}.png"
-                region_path = os.path.join(step2_dir, region_filename)
-                cv2.imwrite(region_path, shear_region)
+                # 根据采样间隔保存剪切面区域
+                if idx % visualization_interval == 0:
+                    region_filename = f"shear_region_frame_{frame_num:06d}.png"
+                    region_path = os.path.join(step2_dir, region_filename)
+                    cv2.imwrite(region_path, shear_region)
+                    visualization_count += 1
                 
                 # 使用FeatureExtractor检测斑块
                 spot_result = self.feature_extractor.detect_all_white_spots(shear_region)
                 
-                # 保存斑块检测结果图
-                if 'all_white_binary_mask' in spot_result:
+                # 根据采样间隔保存斑块检测结果图
+                if idx % visualization_interval == 0 and 'all_white_binary_mask' in spot_result:
                     # 创建斑块可视化图像（参考spot_processor的实现）
                     spot_binary = spot_result['all_white_binary_mask']
                     spot_visualization = self.create_spot_visualization(shear_region, spot_binary)
@@ -361,12 +377,15 @@ class ShearDensityAnalyzer:
                     patch_path = os.path.join(step2_dir, patch_filename)
                     cv2.imwrite(patch_path, spot_visualization)
                 
-                # 分析剪切面密度
+                # 所有帧都执行剪切面密度分析
                 analysis_result = self.analyze_shear_density(image_path, shear_mask)
                 if analysis_result:
                     self.results.append(analysis_result)
             
             print(f"第二步完成，剪切面区域和斑块图已保存到: {step2_dir}")
+            print(f"  - 共保存 {visualization_count} 张剪切面区域图（采样间隔: {visualization_interval}）")
+            print(f"  - 共保存 {visualization_count} 张斑块可视化图像（采样间隔: {visualization_interval}）")
+            print(f"  - 所有帧的斑块检测和密度分析已完成")
         
         # 第三步：计算斑块数量和密度，生成变化曲线图
         print("\n第三步：计算斑块数量和密度，生成变化曲线图...")
@@ -604,23 +623,47 @@ class ShearDensityAnalyzer:
 
 def main():
     """主函数"""
-    import sys
+    import argparse
     
-    # 设置路径
-    roi_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs"
-    output_dir = "/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_shear_density_curve"
+    parser = argparse.ArgumentParser(
+        description='剪切面密度分析工具',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 基本用法
+  python shear_density_analyzer.py --roi_dir data/roi_imgs --output_dir data_shear_density_curve
+  
+  # 指定可视化采样间隔
+  python shear_density_analyzer.py --roi_dir data/roi_imgs --output_dir data_shear_density_curve --viz_interval 50
+  
+  # 使用原始方法（不使用等高线方法）
+  python shear_density_analyzer.py --roi_dir data/roi_imgs --output_dir data_shear_density_curve --no_contour_method
+        """
+    )
     
-    if len(sys.argv) > 1:
-        roi_dir = sys.argv[1]
+    parser.add_argument('--roi_dir', type=str,
+                       default="/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data/roi_imgs",
+                       help='ROI图像目录路径')
+    parser.add_argument('--output_dir', type=str,
+                       default="/Users/aibee/hwp/wphu个人资料/baogang/shear_detection/data_shear_density_curve",
+                       help='输出目录路径')
+    parser.add_argument('--viz_interval', type=int, default=100,
+                       help='可视化采样间隔，每隔多少帧生成一次可视化图像（默认100）')
+    parser.add_argument('--no_contour_method', action='store_true',
+                       help='不使用等高线方法生成剪切面mask（使用原始方法）')
     
-    if len(sys.argv) > 2:
-        output_dir = sys.argv[2]
+    args = parser.parse_args()
 
     # 创建分析器
     analyzer = ShearDensityAnalyzer()
     
-    # 处理图像（默认使用新方法）
-    analyzer.process_images(roi_dir, output_dir, use_contour_method=True)
+    # 处理图像
+    analyzer.process_images(
+        roi_dir=args.roi_dir,
+        output_dir=args.output_dir,
+        use_contour_method=not args.no_contour_method,
+        visualization_interval=args.viz_interval
+    )
 
 if __name__ == "__main__":
     main()

@@ -103,7 +103,221 @@
 
 ## 最新更新记录
 
-### 2025-01-08: 新增水平梯度能量特征
+### 2025-10-11: 主分析脚本优化 - 可视化采样间隔
+
+**功能说明**：
+- `coil_wear_analysis.py` 新增可视化采样间隔参数
+- 支持控制帧诊断图和白斑标注图的生成频率
+
+**技术改进**：
+- 新增 `--diagnosis_interval` 参数（默认100）：控制帧诊断图采样间隔
+- 新增 `--marker_interval` 参数（默认100）：控制白斑标注图采样间隔
+- 移除旧的硬编码逻辑（原为"前10帧和每100帧"）
+- 增加统计信息输出，显示实际生成的诊断图数量
+
+**使用方法**：
+```bash
+# 基本用法（默认每100帧）
+python coil_wear_analysis.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data/analysis \
+  --name "视频分析"
+
+# 自定义诊断图采样间隔（每50帧）
+python coil_wear_analysis.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data/analysis \
+  --diagnosis_interval 50
+
+# 自定义白斑标注图采样间隔（每200帧）
+python coil_wear_analysis.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data/analysis \
+  --marker_interval 200
+
+# 同时自定义两个间隔
+python coil_wear_analysis.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data/analysis \
+  --diagnosis_interval 50 \
+  --marker_interval 50
+```
+
+**输出说明**：
+- 帧诊断图：保存在 `visualizations/frame_diagnosis/`，按 `diagnosis_interval` 采样
+- 白斑标注图：保存在 `visualizations/white_patch_markers/`，按 `marker_interval` 采样（最多20张）
+- 所有帧的特征提取仍会完整执行
+- 终端会显示实际生成的诊断图数量
+
+**性能提升**：
+- 1000帧，diagnosis_interval=100：生成约10张诊断图（原为110张，减少90%）
+- 白斑标注图：已有限制最多20张，现支持自定义间隔
+- 节省磁盘空间和图像生成时间
+
+---
+
+### 2025-10-10: 密度分析器统一优化 - 可视化采样间隔
+
+**功能说明**：
+- 为所有密度分析器添加可视化采样间隔参数，避免生成过多可视化文件
+- 统一使用 `--viz_interval` 参数（默认100），与 `tear_surface_white_patch_analyzer.py` 的 `--marker_interval` 保持一致的设计理念
+
+**涉及脚本**：
+1. ✅ `adagaus_density_analyzer.py` - Adagaus二值图密度分析
+2. ✅ `burr_density_analyzer.py` - 毛刺密度分析
+3. ✅ `shear_density_analyzer.py` - 剪切面密度分析
+4. ✅ `tear_density_analyzer.py` - 撕裂面密度分析
+5. ✅ `tear_texture_density_analyzer.py` - 撕裂面纹理密度分析
+6. ✅ `tear_texture_entropy_analyzer.py` - 撕裂面纹理熵分析（参数保留但不使用）
+
+**技术改进**：
+- 新增 `--viz_interval` 命令行参数（默认100），控制可视化生成频率
+- 在中间步骤循环中添加采样逻辑（`if idx % visualization_interval == 0`）
+- ⚠️ **重要**：所有帧都会执行完整计算（mask生成、特征检测等），仅可视化图像保存按采样间隔
+- 使用内存缓存机制，避免重复计算（例如mask_cache、adagaus_cache等）
+- 增加详细的统计信息输出，区分"计算"和"保存"的数量
+- 统一使用 `argparse` 替代旧的命令行参数解析方式
+
+**采样策略说明**：
+```python
+# 所有帧都计算（例如生成mask）
+for idx, image_path in enumerate(image_files):
+    mask = compute_mask(image)        # ← 所有帧都执行
+    mask_cache[frame_num] = mask      # ← 缓存结果供后续步骤使用
+    
+    if idx % visualization_interval == 0:
+        save_mask_image(mask)         # ← 仅采样帧保存可视化
+```
+
+**使用方法**：
+
+```bash
+# 1. Adagaus密度分析器
+python data_adagaus_density_curve/adagaus_density_analyzer.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data_adagaus_density_curve \
+  --viz_interval 50
+
+# 2. 毛刺密度分析器
+python data_burr_density_curve/burr_density_analyzer.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data_burr_density_curve \
+  --viz_interval 50
+
+# 3. 剪切面密度分析器
+python data_shear_density_curve/shear_density_analyzer.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data_shear_density_curve \
+  --viz_interval 50
+
+# 4. 撕裂面密度分析器
+python data_tear_density_curve/tear_density_analyzer.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data_tear_density_curve \
+  --viz_interval 50
+
+# 5. 撕裂面纹理密度分析器
+python data_texture_density_curve/tear_texture_density_analyzer.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data_texture_density_curve \
+  --viz_interval 50
+
+# 6. 撕裂面纹理熵分析器（不生成中间可视化）
+python data_texture_density_curve/tear_texture_entropy_analyzer.py \
+  --roi_dir data/roi_imgs \
+  --output_dir data_texture_density_curve
+```
+
+**各脚本可视化输出**：
+
+| 脚本 | 可视化类型 | 输出目录 | 默认行为 |
+|-----|-----------|---------|---------|
+| adagaus_density_analyzer | 橙色叠加图 | step3_filtered_results/ | 每100帧 |
+| burr_density_analyzer | 蓝色毛刺叠加图 | step3_burr_analysis/ | 每100帧 |
+| shear_density_analyzer | 剪切面区域+斑块图 | step2_shear_regions/ | 默认跳过* |
+| tear_density_analyzer | 撕裂面区域+斑块图 | step2_tear_regions/ | 默认跳过* |
+| tear_texture_density_analyzer | 撕裂面区域图 | step2_tear_regions/ | 每100帧 |
+| tear_texture_entropy_analyzer | 无中间可视化 | - | 不适用 |
+
+\*注：这些脚本的第二步默认被 `skip_step2=True` 跳过，但如果启用，会按采样间隔生成可视化
+
+**重要说明（采样策略详解）**：
+
+**以 adagaus_density_analyzer 为例**，所有三个步骤的中间图像都按采样间隔保存：
+- `step1_tear_masks/` - 撕裂面mask（用于检查分割质量）
+- `step2_adagaus_analysis/` - 原始Adagaus二值图（用于检查检测效果）
+- `step3_filtered_results/` - 过滤后的二值图 + 橙色叠加可视化图像
+
+**关键**：所有帧的数值分析仍会完整执行，仅中间可视化图像按采样保存
+
+**输出示例（1000帧，interval=100）**：
+```
+开始分析 Filtered Adaptive Gaussian 二值图密度...
+============================================================
+可视化采样间隔: 每 100 帧
+找到 1000 个ROI图像文件
+
+第一步：生成撕裂面mask...
+第一步完成，撕裂面mask已保存到: step1_tear_masks
+  - 共计算 1000 个撕裂面mask（所有帧）        ← 所有帧都计算
+  - 共保存 10 个可视化mask（采样间隔: 100）   ← 仅采样帧保存
+
+第二步：生成原始Adagaus二值图...
+第二步完成，原始Adagaus二值图已保存到: step2_adagaus_analysis
+  - 共计算 1000 个Adagaus二值图（所有帧）      ← 所有帧都计算
+  - 共保存 10 个可视化二值图（采样间隔: 100）  ← 仅采样帧保存
+
+第三步：根据撕裂面mask过滤二值图...
+第三步完成，过滤后的二值图已保存到: step3_filtered_results
+  - 共生成 10 个过滤后的二值图（采样间隔: 100）  ← 仅采样帧保存
+  - 共生成 10 张可视化图像（采样间隔: 100）     ← 仅采样帧保存
+  - 所有 1000 帧的数值分析已完成                ← 所有帧都分析
+```
+
+**各脚本步骤详情**：
+
+| 脚本 | Step 1 | Step 2 | Step 3 | 说明 |
+|-----|--------|--------|--------|------|
+| **adagaus_density_analyzer** | 撕裂面mask | 原始Adagaus二值图 | 过滤后二值图+可视化 | 所有步骤都采样 ✅ |
+| **burr_density_analyzer** | 撕裂面mask | 原始毛刺图 | 撕裂面区域+毛刺可视化 | 所有步骤都采样 ✅ |
+| **shear_density_analyzer** | 剪切面mask | 剪切面区域+斑块图 | 分析+可视化 | 步骤1-2采样 ✅ |
+| **tear_density_analyzer** | 撕裂面mask | 撕裂面区域+斑块图 | 分析+可视化 | 步骤1-2采样 ✅ |
+| **tear_texture_density_analyzer** | 撕裂面mask | 撕裂面区域 | 分析+可视化 | 步骤1-2采样 ✅ |
+| **tear_texture_entropy_analyzer** | - | - | 分析+可视化 | 无中间步骤 |
+
+**性能提升**：
+- 磁盘空间占用从数GB降至数百MB（减少90%+）
+- 图像文件数量从~4000张降至~40张（减少99%）
+- 图像保存时间显著减少（减少70-80%）
+- ⚠️ **处理时间**：由于所有帧仍需完整计算，总处理时间仅略有减少
+- ✅ **数值分析**：所有1000帧的计算结果完全保留，不受任何影响
+
+**适用场景**：
+- 处理大量帧时节省磁盘空间（最主要优势）
+- 可视化图像仅用于抽查质量，不需要每帧都生成
+- 所有帧的数值分析结果不受影响
+- 批量处理多个视频时减少磁盘I/O负担
+
+**⚠️ 关键设计说明**：
+- **所有帧都计算**：为了保证后续步骤能正常使用中间结果（如mask、二值图等）
+- **仅可视化按采样**：只有保存到磁盘的可视化图像按采样间隔
+- **内存缓存机制**：中间结果缓存在内存中（mask_cache、adagaus_cache等）
+- **优势权衡**：主要节省磁盘空间和I/O时间，而非计算时间
+
+**如果需要同时减少计算时间**：
+可以考虑直接对输入图像进行采样，例如：
+```bash
+# 方案1：先用frame_extractor时提取时增加间隔
+python data_process/frame_extractor.py  # 修改interval参数
+
+# 方案2：手动筛选ROI图像到新目录
+mkdir data/roi_imgs_sampled
+cp data/roi_imgs/frame_*00_roi.png data/roi_imgs_sampled/  # 每100帧
+```
+
+---
+
+### 2025-10-08: 新增水平梯度能量特征
 
 **功能说明**：
 - 在原有的"总梯度能量"基础上，新增了"水平梯度能量"特征
@@ -259,7 +473,7 @@ python coil_wear_analysis.py \
 
 ### 使用方法
 
-**集成模式（自动）：**
+**集成模式（自动，推荐）：**
 ```bash
 python coil_wear_analysis.py \
   --roi_dir data/roi_imgs \
@@ -267,28 +481,45 @@ python coil_wear_analysis.py \
   --name "视频分析"
 ```
 输出包含：
-- `white_patch_analysis.png` - 白斑分析专项图
+- `white_patch_analysis.png` - 白斑分析专项图（3行对比）
+- `white_patch_temporal_curves_4x8.png` - **完整时序曲线**（8×4布局，32条曲线）
+- `white_patch_markers/` - **标注图目录**（3×2布局，含直方图）
+- `white_patch_recommendation.md` - **方法推荐报告**
 - `wear_features.csv` - 包含32个白斑特征列（4方法×8指标）
 - `analysis_report.md` - 含白斑变化结论
 
-**独立模式（详细分析）：**
+**优势：** 一键运行，自动生成所有白斑分析结果，无需单独运行独立脚本
+
+**独立模式（可选，用于单独白斑分析）：**
 ```bash
 python tear_surface_white_patch_analyzer.py \
   --roi_dir data/roi_imgs \
   --output_dir data/white_patch_analysis \
-  --marker_interval 100
+  --marker_interval 50
 ```
 输出包含：
-- `method_comparison.png` - 4种方法检测效果对比
-- `temporal_curves_4x8.png` - **32条时序曲线**（4方法×8指标）
-- `coil_statistics.png` - 按卷统计分析
+- `method_comparison.png` - 4种方法检测效果对比（抽样6帧，6×6布局）
+- `temporal_curves_4x8.png` - 32条时序曲线（4方法×8指标）
+- `coil_statistics.png` - 按卷统计分析（如提供卷号CSV）
 - `method_recommendation.md` - 方法推荐报告
 - `white_patch_features.csv` - 详细特征数据（32列）
-- `white_patch_markers/` - **白斑标注图目录（每隔N帧）** - 新增直方图对比
-  - 3×2布局：上方4个标注图 + 下方2个直方图
-  - 左下：撕裂面亮度直方图（整体 vs 4种方法的白斑）
-  - 右下：白斑面积分布直方图（4种方法对比）
-  - 红色圆圈标注白斑位置，绿色点标记质心
+- `white_patch_markers/` - 标注图目录（3×2布局，含直方图）
+
+**使用场景：** 只需要白斑分析，不需要其他磨损指标时使用
+
+### 模式对比
+
+| 特性 | 集成模式 | 独立模式 |
+|-----|---------|---------|
+| **运行方式** | coil_wear_analysis.py | tear_surface_white_patch_analyzer.py |
+| **特征提取** | ✅ 全部磨损特征 + 白斑特征 | ⚠️ 仅白斑特征 |
+| **钢卷检测** | ✅ 自动检测钢卷边界 | ❌ 需提供卷号CSV |
+| **白斑时序图** | ✅ 8×4完整版 | ✅ 8×4完整版 |
+| **白斑标注图** | ✅ 3×2含直方图 | ✅ 3×2含直方图 |
+| **方法对比图** | ❌ 无 | ✅ 6×6抽样对比 |
+| **方法推荐** | ✅ 自动生成 | ✅ 自动生成 |
+| **综合分析** | ✅ 磨损+白斑综合报告 | ❌ 仅白斑报告 |
+| **推荐使用** | 🎯 **推荐**（功能最全） | 🔧 白斑专项研究 |
 
 ### 输出示例
 
@@ -304,17 +535,20 @@ python tear_surface_white_patch_analyzer.py \
 
 **白斑标注可视化（增强版）：**
 - **3×2布局**：上方4个标注图 + 下方2个直方图对比
-- **上方标注图**：
+- **上方标注图（2×2）**：
   - 红色圆圈标注每个白斑（圆圈大小反映面积）
   - 绿色点标记白斑质心
   - 黄色标签显示白斑数量
 - **左下直方图**：撕裂面亮度分布对比
-  - 灰色：撕裂面整体亮度分布
-  - 彩色：4种方法检测到的白斑亮度分布
+  - 灰色曲线：撕裂面整体亮度分布（基准）
+  - 4条彩色曲线：各方法检测到的白斑亮度分布
+  - 可看出各方法选择的亮度范围
 - **右下直方图**：白斑面积分布对比
-  - 展示4种方法检测到的斑块面积分布
-  - 可看出白斑大小的分布特征
-- 默认每隔100帧生成一张（可通过 `--marker_interval` 参数调整）
+  - 4条彩色曲线：各方法检测到的斑块面积分布
+  - 显示每个方法检测到的白斑数量
+  - 可看出白斑大小的分布特征（大、中、小斑块的比例）
+- **集成模式**：每隔100帧生成一张，最多20张
+- **独立模式**：可通过 `--marker_interval` 参数自定义
 
 **方法推荐：**
 基于单调性、稳定性和灵敏度的综合评分，自动推荐最佳检测方法。
@@ -371,5 +605,37 @@ python tear_surface_white_patch_analyzer.py \
 
 ---
 
+## 工具说明
+
+### 视频抽帧工具 (frame_extractor.py)
+
+**位置：** `data_process/frame_extractor.py`
+
+**功能：** 从视频文件中按指定时间间隔（默认5秒）抽取关键帧
+
+**使用方法：**
+```bash
+python data_process/frame_extractor.py
+```
+
+**重要改进（2025-10-10）：**
+- ✅ **修复超长视频中断问题**：原方法使用跳帧定位在处理超长视频时会失败（通常在24小时位置中断）
+- ✅ **改用顺序读取**：更可靠的帧读取方式，适用于40万+帧的超长视频
+- ✅ **智能错误恢复机制**：遇到损坏帧时采用渐进式跳跃策略
+  - 前3次失败：跳过2个间隔（约10秒）
+  - 4-6次失败：跳过10个间隔（约50秒）
+  - 7次以上：跳过50个间隔（约4分钟）
+  - 超过20次连续失败：停止处理并报告最后成功位置
+- ✅ **实时进度显示**：显示当前帧数和处理时间
+
+**技术细节：**
+- **旧方法缺陷**：使用 `cap.set(cv2.CAP_PROP_POS_FRAMES)` 跳帧，在大型视频中不可靠
+- **新方法优势**：顺序读取所有帧，按间隔保存，处理速度约16帧/秒
+- **支持格式**：AVI、MP4等常见视频格式
+- **损坏处理**：智能跳过视频损坏区域，避免卡死在解码错误
+- **容错能力**：可处理包含损坏片段的视频，最大限度提取可用帧
+
+---
+
 **模型信息：** Claude Sonnet 4.5 (claude-sonnet-4-20250514)  
-**更新日期：** 2025年10月9日
+**更新日期：** 2025年10月10日

@@ -78,19 +78,60 @@ class FrameExtractor:
             
             frame_counter = 0
             saved_frame_number = 0
-            success = True
+            consecutive_failures = 0
+            last_successful_frame = 0
             
             # 创建进度条
             progress_bar = tqdm(total=expected_frames, desc="抽帧进度", unit="帧")
             
-            while success:
-                # 设置视频位置到指定帧
-                self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_counter)
-                
+            # 使用顺序读取方式，更可靠
+            while frame_counter < self.frame_count:
                 # 读取帧
                 success, frame = self.video_cap.read()
                 
-                if success:
+                if not success or frame is None:
+                    consecutive_failures += 1
+                    
+                    # 如果连续失败，跳过更大的区间
+                    if consecutive_failures <= 3:
+                        skip_frames = frame_interval * 2  # 跳过2个间隔
+                    elif consecutive_failures <= 6:
+                        skip_frames = frame_interval * 10  # 跳过10个间隔
+                    else:
+                        skip_frames = frame_interval * 50  # 跳过50个间隔
+                    
+                    # 计算跳过的时间
+                    skip_time = skip_frames / self.fps
+                    
+                    print(f"\n⚠️  警告：帧 {frame_counter} 读取失败（连续失败{consecutive_failures}次）")
+                    print(f"    跳过 {skip_frames} 帧（约{skip_time:.1f}秒）...")
+                    
+                    # 检查是否超过连续失败限制
+                    if consecutive_failures > 20:
+                        print(f"\n❌ 错误：连续失败{consecutive_failures}次，视频可能严重损坏")
+                        print(f"    已成功处理到帧 {last_successful_frame}（{last_successful_frame/self.fps:.1f}秒）")
+                        break
+                    
+                    # 尝试跳过损坏区域
+                    next_pos = frame_counter + skip_frames
+                    if next_pos < self.frame_count:
+                        try:
+                            self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, next_pos)
+                            frame_counter = next_pos
+                            continue
+                        except Exception as e:
+                            print(f"    跳帧失败: {e}")
+                            break
+                    else:
+                        print(f"\n✓ 已接近视频末尾，停止处理")
+                        break
+                
+                # 成功读取，重置失败计数
+                consecutive_failures = 0
+                last_successful_frame = frame_counter
+                
+                # 检查是否是要保存的帧
+                if frame_counter % frame_interval == 0:
                     # 计算当前时间（秒）
                     current_time = frame_counter / self.fps
                     
@@ -106,21 +147,13 @@ class FrameExtractor:
                         # 更新进度条
                         progress_bar.update(1)
                         progress_bar.set_postfix({
-                            '当前帧': f"{saved_frame_number:06d}",
+                            '当前帧': f"{frame_counter:06d}",
                             '时间': f"{current_time:.1f}s"
                         })
                     else:
-                        print(f"警告：无法保存帧到 {output_path}")
-                    
-                    # 跳到下一个抽帧位置
-                    frame_counter += frame_interval
-                    
-                    # 检查是否超出视频长度
-                    if frame_counter >= self.frame_count:
-                        break
-                else:
-                    # 到达视频末尾
-                    break
+                        print(f"\n警告：无法保存帧到 {output_path}")
+                
+                frame_counter += 1
             
             # 关闭进度条
             progress_bar.close()
@@ -225,9 +258,26 @@ def main(video_path: str=None, output_dir: str=None, interval_seconds: float=5.0
 
 
 if __name__ == "__main__":
-    video_path = None
-    output_dir = None
-    interval_seconds = 5.0
+    video_path = "/Users/aibee/hwp/wphu个人资料/baogang/20250926/Video_20250909110956225_2025091310250004.avi"
+    output_dir = "data_video5_20250909110956225_2025091310250004/images"
+    video_path = "/Users/aibee/hwp/wphu个人资料/baogang/20250926/Video_20250826142203247_2025082814264202.avi"
+    output_dir = "data_video6_20250826142203247_2025082814264202/images"
+    video_path = "/Users/aibee/hwp/wphu个人资料/baogang/20250926/Video_20250909110956225.avi"
+    output_dir = "data_video7_20250909110956225/images"
+    video_path = "/Users/aibee/hwp/wphu个人资料/baogang/data_baogang/20250820/Video_20250815151858901_2025081615211801.avi"
+    output_dir = "data_video8_20250815151858901_2025081615211801/images"
+    video_path = "/Users/aibee/hwp/wphu个人资料/baogang/data_baogang/20250820/Video_20250815151858901_2025081715233702.avi"
+    output_dir = "data_video9_20250815151858901_2025081715233702/images"
+    
+    video_path = "/Users/aibee/hwp/wphu个人资料/baogang/data_baogang/20250820/Video_20250815151858901.avi"
+    output_dir = "data_video10_20250815151858901/images"
+    video_path = "/Users/aibee/hwp/wphu个人资料/baogang/data_baogang/20250820/Video_20250818110226366.avi"
+    output_dir = "data_video11_20250818110226366/images"
+    video_path = "/Users/aibee/hwp/wphu个人资料/baogang/data_baogang/20250820/Video_20250819134002235.avi"
+    output_dir = "data_video12_20250819134002235/images"
+    
+
+    interval_seconds = 5.0  # 秒
     if len(sys.argv) > 1:
         video_path = str(sys.argv[1])
     if len(sys.argv) > 2:
