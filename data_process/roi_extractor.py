@@ -47,14 +47,16 @@ class ROIExtractor:
         os.makedirs(self.roi_dir, exist_ok=True)
     
     def extract_roi_from_video(self, video_file: str, output_dir: str, 
-                              target_size: Tuple[int, int] = (128, 512)) -> Dict[str, Any]:
+                              target_size: Tuple[int, int] = None,
+                              skip_preprocessing: bool = True) -> Dict[str, Any]:
         """
         从视频文件提取ROI区域
         
         Args:
             video_file: 输入视频文件路径
             output_dir: 输出ROI目录路径
-            target_size: ROI标准化后的目标尺寸
+            target_size: ROI标准化后的目标尺寸，None表示保持原始尺寸
+            skip_preprocessing: 是否跳过预处理（对比度增强和去噪），True保持原始质量
             
         Returns:
             ROI提取结果统计
@@ -103,7 +105,7 @@ class ROIExtractor:
             
             # 提取ROI
             roi_image, processing_info = self.preprocessor.preprocess_pipeline(
-                frame, target_size=target_size)
+                frame, target_size=target_size, skip_preprocessing=skip_preprocessing)
             
             # 保存ROI图像
             success = cv2.imwrite(output_file, roi_image)
@@ -130,12 +132,14 @@ class ROIExtractor:
             'target_size': target_size
         }
     
-    def extract_roi_from_all_frames(self, target_size: Tuple[int, int] = (128, 512)) -> Dict[str, Any]:
+    def extract_roi_from_all_frames(self, target_size: Tuple[int, int] = None,
+                                   skip_preprocessing: bool = True) -> Dict[str, Any]:
         """
         从所有帧图像提取ROI区域
         
         Args:
-            target_size: ROI标准化后的目标尺寸
+            target_size: ROI标准化后的目标尺寸，None表示保持原始尺寸
+            skip_preprocessing: 是否跳过预处理（对比度增强和去噪），True保持原始质量
             
         Returns:
             ROI提取结果统计
@@ -174,7 +178,7 @@ class ROIExtractor:
                     
                     # 提取ROI
                     roi_image, processing_info = self.preprocessor.preprocess_pipeline(
-                        image_path, target_size=target_size)
+                        image_path, target_size=target_size, skip_preprocessing=skip_preprocessing)
                     
                     # 保存ROI图像
                     success = cv2.imwrite(roi_output_path, roi_image)
@@ -212,13 +216,15 @@ class ROIExtractor:
             return {'success': False, 'error': f'ROI提取时出错: {str(e)}'}
     
     def extract_roi_with_custom_config(self, custom_config: Dict[str, Any], 
-                                     target_size: Tuple[int, int] = (128, 512)) -> Dict[str, Any]:
+                                     target_size: Tuple[int, int] = None,
+                                     skip_preprocessing: bool = True) -> Dict[str, Any]:
         """
         使用自定义配置提取ROI区域
         
         Args:
             custom_config: 自定义预处理配置
-            target_size: ROI标准化后的目标尺寸
+            target_size: ROI标准化后的目标尺寸，None表示保持原始尺寸
+            skip_preprocessing: 是否跳过预处理（对比度增强和去噪），True保持原始质量
             
         Returns:
             ROI提取结果统计
@@ -260,7 +266,7 @@ class ROIExtractor:
                     
                     # 提取ROI
                     roi_image, processing_info = custom_preprocessor.preprocess_pipeline(
-                        image_path, target_size=target_size)
+                        image_path, target_size=target_size, skip_preprocessing=skip_preprocessing)
                     
                     # 保存ROI图像
                     success = cv2.imwrite(roi_output_path, roi_image)
@@ -297,12 +303,14 @@ class ROIExtractor:
         except Exception as e:
             return {'success': False, 'error': f'ROI提取时出错: {str(e)}'}
     
-    def continue_roi_extraction(self, target_size: Tuple[int, int] = (128, 512)) -> Dict[str, Any]:
+    def continue_roi_extraction(self, target_size: Tuple[int, int] = None,
+                               skip_preprocessing: bool = True) -> Dict[str, Any]:
         """
         继续完成ROI提取（跳过已存在的文件）
         
         Args:
-            target_size: ROI标准化后的目标尺寸
+            target_size: ROI标准化后的目标尺寸，None表示保持原始尺寸
+            skip_preprocessing: 是否跳过预处理（对比度增强和去噪），True保持原始质量
             
         Returns:
             ROI提取结果统计
@@ -344,7 +352,7 @@ class ROIExtractor:
                     
                     # 提取ROI
                     roi_image, processing_info = self.preprocessor.preprocess_pipeline(
-                        image_path, target_size=target_size)
+                        image_path, target_size=target_size, skip_preprocessing=skip_preprocessing)
                     
                     # 保存ROI图像
                     success = cv2.imwrite(roi_output_path, roi_image)
@@ -417,14 +425,16 @@ class ROIExtractor:
             return {'success': False, 'error': f'获取状态时出错: {str(e)}'}
     
     def extract_roi_from_images(self, image_dir: str, output_dir: str, 
-                               target_size: Tuple[int, int] = (128, 512)) -> Dict[str, Any]:
+                               target_size: Tuple[int, int] = None,
+                               skip_preprocessing: bool = True) -> Dict[str, Any]:
         """
         从图像目录提取ROI区域
         
         Args:
             image_dir: 输入图像目录路径
             output_dir: 输出ROI目录路径
-            target_size: ROI标准化后的目标尺寸
+            target_size: ROI标准化后的目标尺寸，None表示保持原始尺寸
+            skip_preprocessing: 是否跳过预处理（对比度增强和去噪），True保持原始质量
             
         Returns:
             ROI提取结果统计
@@ -473,7 +483,7 @@ class ROIExtractor:
                     
                     # 提取ROI
                     roi_image, processing_info = self.preprocessor.preprocess_pipeline(
-                        image_path, target_size=target_size)
+                        image_path, target_size=target_size, skip_preprocessing=skip_preprocessing)
                     
                     # 保存ROI图像
                     success = cv2.imwrite(output_file, roi_image)

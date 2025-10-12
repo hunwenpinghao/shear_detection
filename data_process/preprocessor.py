@@ -149,19 +149,94 @@ class ImagePreprocessor:
         """
         return cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
     
+    def extract_roi_only(self, image_path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        仅提取ROI区域，不做任何预处理，保持原始图像质量
+        
+        策略：使用预处理后的图像来定位ROI，然后从原始图像中提取，保持原始质量
+        
+        Args:
+            image_path: 图像路径
+            
+        Returns:
+            roi_image: 提取的ROI图像（原始质量）
+            processing_info: 处理信息
+        """
+        # 加载原始图像
+        original_image = self.load_image(image_path)
+        
+        # 为了准确定位ROI，使用预处理后的图像
+        enhanced_image = self.enhance_contrast(original_image)
+        denoised_image = self.denoise_image(enhanced_image)
+        
+        # 从预处理图像中定位ROI
+        threshold = self.config['roi_threshold']
+        _, binary = cv2.threshold(denoised_image, threshold, 255, cv2.THRESH_BINARY)
+        
+        # 形态学操作定位ROI
+        kernel_size = self.config['morphology_kernel']
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        
+        # 轮廓检测
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            raise ValueError("未检测到有效的白色条状物区域")
+        
+        max_contour = max(contours, key=cv2.contourArea)
+        contour_area = cv2.contourArea(max_contour)
+        
+        if contour_area < self.config['min_contour_area']:
+            raise ValueError(f"检测到的区域太小: {contour_area} < {self.config['min_contour_area']}")
+        
+        # 计算包围盒
+        x, y, w, h = cv2.boundingRect(max_contour)
+        
+        # 添加边距
+        margin = 10
+        x = max(0, x - margin)
+        y = max(0, y - margin)
+        w = min(original_image.shape[1] - x, w + 2 * margin)
+        h = min(original_image.shape[0] - y, h + 2 * margin)
+        
+        # 关键：从原始图像提取ROI（保持原始质量）
+        roi_image = original_image[y:y+h, x:x+w]
+        
+        processing_info = {
+            'original_shape': original_image.shape,
+            'final_shape': roi_image.shape,
+            'roi_info': {
+                'bbox': (x, y, w, h),
+                'contour_area': contour_area,
+                'roi_shape': roi_image.shape,
+                'original_shape': original_image.shape
+            },
+            'preprocessing_steps': ['roi_location_with_preprocessing', 'extract_from_original']
+        }
+        
+        return roi_image, processing_info
+    
     def preprocess_pipeline(self, image_path: str, 
-                          target_size: Optional[Tuple[int, int]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+                          target_size: Optional[Tuple[int, int]] = None,
+                          skip_preprocessing: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         完整的预处理流水线
         
         Args:
             image_path: 图像路径
             target_size: 目标尺寸，如果为None则不调整尺寸
+            skip_preprocessing: 如果为True，跳过对比度增强和去噪，仅提取ROI保持原始质量
             
         Returns:
             processed_image: 处理后的图像
             processing_info: 处理信息
         """
+        # 如果跳过预处理，直接提取ROI
+        if skip_preprocessing:
+            return self.extract_roi_only(image_path)
+        
         # 加载图像
         original_image = self.load_image(image_path)
         
