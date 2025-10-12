@@ -114,4 +114,12 @@ if __name__ == "__main__":
     skips=['step1', 'step2']
     video_path='/Users/aibee/hwp/wphu个人资料/baogang/data_baogang/20250820/Video_20250820124904881.avi'
     output_dir='data_video4_20250820124904881'
+
+    if len(sys.argv) > 1:
+        video_path = sys.argv[1]
+    if len(sys.argv) > 2:
+        output_dir = sys.argv[2]
+    if len(sys.argv) > 3:
+        skips = sys.argv[3].split(',')
+
     run(skips, video_path, output_dir)
