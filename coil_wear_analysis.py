@@ -2082,18 +2082,21 @@ class UniversalWearAnalyzer:
             # === 方法1：移动最大值包络线 ===
             window = min(200, len(values)//5)
             max_envelope = maximum_filter1d(values, size=window, mode='nearest')
+            smooth_env = max_envelope  # 默认值，如果后续处理失败则使用原始包络线
             if len(max_envelope) > 51:
                 smooth_env = savgol_filter(max_envelope, 
                                           window_length=min(51, len(max_envelope)//2*2+1), 
                                           polyorder=3)
+            if len(smooth_env) > 0:
                 ax_left.plot(frames, smooth_env, '-', color='orange', 
                             linewidth=2.5, label='方法1:包络线', alpha=0.8)
             
             # === 方法2：周期峰值样条插值 ===
+            cycle_frames = []
+            cycle_maxes = []
+            cycles = []
             try:
                 cycles = self._detect_cycles_advanced(values)
-                cycle_frames = []
-                cycle_maxes = []
                 
                 for start, end in cycles:
                     if end > start:
@@ -2111,10 +2114,9 @@ class UniversalWearAnalyzer:
                 print(f"  警告: 样条插值失败 ({feature}): {e}")
             
             # === 方法3：全局二次拟合 ===
+            cycle_key_frames = []
+            cycle_key_values = []
             try:
-                cycle_key_frames = []
-                cycle_key_values = []
-                
                 for start, end in cycles:
                     if end - start > 10:
                         window_size = min(50, (end - start) // 2)
