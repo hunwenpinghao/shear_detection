@@ -994,7 +994,12 @@ python split_longterm_trend_charts.py --input_dir data/coil_wear_analysis --dpi 
 - `--dpi`：输出图片分辨率（默认：200）
 
 **集成说明：**
-此功能已集成到 `coil_wear_analysis.py` 中，运行磨损分析时会自动生成单独的趋势图。如果只需要重新生成趋势图而不重新分析，可以单独运行此脚本。
+✅ **已完全集成到 `coil_wear_analysis.py`**（2025-10-13更新）
+- 运行 `coil_wear_analysis.py` 时会自动生成：
+  - 5个单独的长期趋势图（x轴60英寸）
+  - 1个6×1组合图（包含综合指标，x轴80英寸）
+- 与 `split_longterm_trend_charts.py` 保持完全一致的图表样式和尺寸
+- 如果只需要重新生成趋势图而不重新分析，可以单独运行 `split_longterm_trend_charts.py` 脚本
 
 ---
 

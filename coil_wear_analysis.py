@@ -771,6 +771,7 @@ class UniversalWearAnalyzer:
         self._plot_wear_progression(df, os.path.join(viz_dir, 'wear_progression.png'))
         self._plot_longterm_trend(df, os.path.join(viz_dir, 'longterm_trend.png'))
         self._plot_individual_longterm_trends(df, viz_dir)
+        self._plot_combined_trends_6x1(df, viz_dir)
         self._plot_recommended_indicators(df, os.path.join(viz_dir, 'recommended_indicators.png'))
         
         # 生成水平梯度能量对比图
@@ -1387,8 +1388,8 @@ class UniversalWearAnalyzer:
                 print(f"  警告: 特征 '{feat}' 不存在，跳过")
                 continue
             
-            # 创建单独的图表，拉长x轴
-            fig, ax = plt.subplots(figsize=(15, 6))
+            # 创建单独的图表，x轴拉长至60英寸（与split_longterm_trend_charts.py一致）
+            fig, ax = plt.subplots(figsize=(60, 6))
             
             # 原始数据连线（半透明）
             ax.plot(df['frame_id'], df[feat],
@@ -1429,6 +1430,177 @@ class UniversalWearAnalyzer:
             print(f"  已保存: {feat}_trend.png")
         
         print(f"✓ 单独长期趋势图已保存到: {output_dir}")
+    
+    def _plot_combined_trends_6x1(self, df: pd.DataFrame, viz_dir: str):
+        """
+        绘制6×1组合图（综合指标 + 5个特征上下罗列）
+        
+        综合指标：4个特征归一化叠加（不含梯度能量）
+        """
+        print("\n生成6×1组合长期趋势图...")
+        
+        # 定义特征及其对应的标签和颜色
+        features_to_plot = [
+            ('avg_rms_roughness', '平均RMS粗糙度', 'blue'),
+            ('max_notch_depth', '最大缺口深度', 'red'),
+            ('right_peak_density', '剪切面峰密度', 'green'),
+            ('avg_gradient_energy', '平均梯度能量', 'purple'),
+            ('tear_shear_area_ratio', '撕裂/剪切面积比', 'orange'),
+        ]
+        
+        # 创建输出目录
+        output_dir = os.path.join(viz_dir, 'individual_trends')
+        ensure_dir(output_dir)
+        
+        # 创建6×1子图布局，x轴设置为80英寸
+        fig, axes = plt.subplots(6, 1, figsize=(80, 29))
+        
+        # ========== 第1个子图：综合指标（4个特征归一化后叠加，不含梯度能量） ==========
+        ax_composite = axes[0]
+        
+        # 计算综合指标 - 排除 avg_gradient_energy
+        composite_score = np.zeros(len(df))
+        valid_features = []
+        excluded_features = ['avg_gradient_energy']  # 排除的特征
+        
+        for feat, label, color in features_to_plot:
+            if feat in df.columns and feat not in excluded_features:
+                # 归一化到0-1
+                values = df[feat].values
+                if values.max() > values.min():
+                    normalized = (values - values.min()) / (values.max() - values.min())
+                    composite_score += normalized
+                    valid_features.append((feat, label))
+        
+        # 平均化（避免简单求和导致值过大）
+        if len(valid_features) > 0:
+            composite_score = composite_score / len(valid_features)
+        
+        # 绘制综合指标
+        ax_composite.plot(df['frame_id'], composite_score,
+                         alpha=0.3, linewidth=1.5, color='darkblue',
+                         zorder=1, label='综合磨损指标')
+        
+        ax_composite.scatter(df['frame_id'], composite_score,
+                            alpha=0.4, s=20, color='darkblue', zorder=2)
+        
+        # 线性拟合
+        z_comp = np.polyfit(df['frame_id'], composite_score, 1)
+        p_comp = np.poly1d(z_comp)
+        ax_composite.plot(df['frame_id'], p_comp(df['frame_id']),
+                         color='red', linewidth=4, linestyle='--',
+                         zorder=3, label=f'线性趋势: y={z_comp[0]:.6f}x+{z_comp[1]:.2f}')
+        
+        # 趋势标注
+        trend_comp = "增加" if z_comp[0] > 0 else "减少"
+        trend_color_comp = 'lightgreen' if z_comp[0] > 0 else 'lightcoral'
+        ax_composite.text(0.02, 0.98, f'趋势: {trend_comp}',
+                         transform=ax_composite.transAxes, fontsize=12,
+                         verticalalignment='top', fontweight='bold',
+                         bbox=dict(boxstyle='round', facecolor=trend_color_comp, alpha=0.7,
+                                  edgecolor='black', linewidth=2))
+        
+        # 统计信息
+        mean_comp = composite_score.mean()
+        std_comp = composite_score.std()
+        min_comp = composite_score.min()
+        max_comp = composite_score.max()
+        
+        stats_text_comp = f'均值: {mean_comp:.3f}\n标准差: {std_comp:.3f}\n范围: [{min_comp:.3f}, {max_comp:.3f}]'
+        ax_composite.text(0.98, 0.98, stats_text_comp,
+                         transform=ax_composite.transAxes, fontsize=10,
+                         verticalalignment='top', horizontalalignment='right',
+                         bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.8,
+                                  edgecolor='gray', linewidth=1))
+        
+        # 添加特征说明
+        features_text = '包含特征: ' + ', '.join([label for _, label in valid_features])
+        ax_composite.text(0.02, 0.02, features_text,
+                         transform=ax_composite.transAxes, fontsize=9,
+                         verticalalignment='bottom',
+                         bbox=dict(boxstyle='round', facecolor='white', alpha=0.7,
+                                  edgecolor='gray', linewidth=0.5))
+        
+        ax_composite.set_xlabel('帧编号', fontsize=13, fontweight='bold')
+        ax_composite.set_ylabel('综合磨损指标 (归一化)', fontsize=13, fontweight='bold')
+        ax_composite.set_title('综合磨损指标 (4特征归一化叠加: 不含梯度能量)', fontsize=16, fontweight='bold', pad=15, 
+                              bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
+        ax_composite.grid(True, alpha=0.3)
+        ax_composite.legend(loc='upper left', fontsize=11)
+        ax_composite.set_xlim(df['frame_id'].min(), df['frame_id'].max())
+        ax_composite.set_ylim(-0.05, 1.05)
+        
+        # ========== 后5个子图：各个特征 ==========
+        
+        for idx, (feat, label, color) in enumerate(features_to_plot):
+            ax = axes[idx + 1]  # 因为第0个位置被综合指标占用
+            
+            if feat not in df.columns:
+                ax.text(0.5, 0.5, f'特征 "{feat}" 不存在', 
+                       ha='center', va='center', fontsize=14, color='red')
+                ax.set_title(f'{label} - 数据缺失', fontsize=14, fontweight='bold')
+                continue
+            
+            # 原始数据连线（半透明）
+            ax.plot(df['frame_id'], df[feat],
+                   alpha=0.3, linewidth=1.2, color=color,
+                   zorder=1, label='逐帧曲线')
+            
+            # 散点标记
+            ax.scatter(df['frame_id'], df[feat],
+                      alpha=0.4, s=15, color=color, zorder=2)
+            
+            # 线性拟合趋势线
+            z = np.polyfit(df['frame_id'], df[feat], 1)
+            p = np.poly1d(z)
+            ax.plot(df['frame_id'], p(df['frame_id']),
+                   color='darkred', linewidth=3, linestyle='--',
+                   zorder=3, label=f'线性趋势: y={z[0]:.6f}x+{z[1]:.2f}')
+            
+            # 计算趋势方向
+            trend = "增加" if z[0] > 0 else "减少"
+            trend_color = 'lightgreen' if z[0] > 0 else 'lightcoral'
+            ax.text(0.02, 0.98, f'趋势: {trend}',
+                   transform=ax.transAxes, fontsize=11,
+                   verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor=trend_color, alpha=0.6,
+                            edgecolor='black', linewidth=1))
+            
+            # 添加统计信息
+            mean_val = df[feat].mean()
+            std_val = df[feat].std()
+            min_val = df[feat].min()
+            max_val = df[feat].max()
+            
+            stats_text = f'均值: {mean_val:.2f}\n标准差: {std_val:.2f}\n范围: [{min_val:.2f}, {max_val:.2f}]'
+            ax.text(0.98, 0.98, stats_text,
+                   transform=ax.transAxes, fontsize=9,
+                   verticalalignment='top', horizontalalignment='right',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.7,
+                            edgecolor='gray', linewidth=0.5))
+            
+            ax.set_xlabel('帧编号', fontsize=12, fontweight='bold')
+            ax.set_ylabel(label, fontsize=12, fontweight='bold')
+            ax.set_title(f'{label} 长期趋势', fontsize=14, fontweight='bold', pad=10)
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='upper left', fontsize=10)
+            
+            # 调整x轴范围，确保拉长效果
+            ax.set_xlim(df['frame_id'].min(), df['frame_id'].max())
+        
+        # 设置总标题
+        fig.suptitle(f'{self.analysis_name} - 剪刀磨损长期趋势综合分析（综合指标[4特征] + 5特征详情）', 
+                    fontsize=18, fontweight='bold', y=0.996)
+        
+        # 调整子图间距
+        plt.tight_layout(rect=[0, 0, 1, 0.996])
+        
+        # 保存
+        combined_save_path = os.path.join(output_dir, 'all_trends_6x1.png')
+        plt.savefig(combined_save_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+        
+        print(f"✓ 6×1组合图已保存: all_trends_6x1.png")
     
     def _plot_horizontal_gradient_comparison(self, df: pd.DataFrame, save_path: str):
         """绘制水平梯度能量对比图（总梯度 vs 水平梯度）"""

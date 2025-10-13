@@ -262,6 +262,71 @@ class ShearTextureDensityAnalyzer:
         # 重新保存包含归一化字段的结果
         self.save_results(os.path.dirname(csv_path))
     
+    def load_existing_shear_regions(self, image_files, step2_dir):
+        """加载现有的剪切面区域数据（用于只计算纹理特征而不重新检测）"""
+        
+        print("加载现有剪切面区域数据...")
+        
+        # 检查step2目录是否存在
+        if not os.path.exists(step2_dir):
+            print(f"目录不存在: {step2_dir}")
+            return []
+        
+        existing_regions = []
+        
+        for image_path in image_files:
+            frame_num = self.extract_frame_info(image_path)
+            if frame_num >= 0:
+                # 查找对应的剪切面区域文件
+                region_filename = f"shear_region_frame_{frame_num:06d}.png"
+                region_path = os.path.join(step2_dir, region_filename)
+                
+                if os.path.exists(region_path):
+                    existing_regions.append((image_path, region_path, frame_num))
+        
+        if existing_regions:
+            print(f"找到 {len(existing_regions)} 个现有的剪切面区域文件")
+        else:
+            print("未找到现有的剪切面区域文件")
+        
+        return existing_regions
+    
+    def recompute_texture_from_existing_regions(self, image_files, step2_dir):
+        """从现有的剪切面区域文件重新计算纹理特征（快速模式）"""
+        
+        # 加载现有的剪切面区域数据
+        existing_regions = self.load_existing_shear_regions(image_files, step2_dir)
+        
+        if not existing_regions:
+            print("未找到现有的剪切面区域文件，尝试从mask文件加载...")
+            return self.recompute_texture_from_existing_masks(image_files, 
+                os.path.join(os.path.dirname(step2_dir), 'step1_shear_masks'), step2_dir)
+        
+        # 从剪切面区域计算纹理特征
+        print("从现有剪切面区域重新计算纹理特征...")
+        for image_path, region_path, frame_num in tqdm(existing_regions, desc="计算纹理特征", unit="图像"):
+            try:
+                # 读取剪切面区域图像
+                shear_region = cv2.imread(region_path, cv2.IMREAD_GRAYSCALE)
+                
+                if shear_region is None:
+                    print(f"无法读取图像: {region_path}")
+                    continue
+                
+                # 从剪切面区域创建mask
+                shear_mask = (shear_region > 0).astype(np.uint8) * 255
+                
+                # 分析纹理密度
+                analysis_result = self.analyze_shear_texture_density(image_path, shear_mask)
+                if analysis_result:
+                    self.results.append(analysis_result)
+                    
+            except Exception as e:
+                print(f"处理帧 {frame_num} 时出错: {e}")
+                continue
+        
+        print(f"纹理特征计算完成，共处理 {len(self.results)} 个样本")
+    
     def recompute_texture_from_existing_masks(self, image_files, step1_dir, step2_dir):
         """从现有的剪切面mask文件重新计算纹理特征"""
         
@@ -511,9 +576,9 @@ class ShearTextureDensityAnalyzer:
             print("发现现有分析结果，正在加载并补充归一化字段...")
             self.load_and_enhance_existing_results(csv_path)
         elif len(self.results) == 0:
-            # 尝试从现有的剪切面mask文件重新计算纹理特征
-            print("尝试从现有剪切面mask文件重新计算纹理特征...")
-            self.recompute_texture_from_existing_masks(image_files, step1_dir, step2_dir)
+            # 尝试从现有的剪切面区域文件或mask文件重新计算纹理特征
+            print("尝试从现有数据重新计算纹理特征...")
+            self.recompute_texture_from_existing_regions(image_files, step2_dir)
             
             if len(self.results) == 0:
                 print("警告：无法找到现有的剪切面mask文件，请先运行剪切面检测")

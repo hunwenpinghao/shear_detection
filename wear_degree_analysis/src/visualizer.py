@@ -51,10 +51,11 @@ class WearVisualizer:
             print(f"帧 {frame_id} 预处理失败，跳过可视化")
             return
         
-        fig = plt.figure(figsize=(20, 12))
+        # 扩展为 3×3 布局以增加更多可视化
+        fig = plt.figure(figsize=(24, 18))
         
         # 1. 原图 + 中心线 + 法线网格
-        ax1 = plt.subplot(2, 3, 1)
+        ax1 = plt.subplot(3, 3, 1)
         ax1.imshow(image, cmap='gray')
         
         # 绘制中心线
@@ -76,7 +77,7 @@ class WearVisualizer:
         ax1.axis('off')
         
         # 2. 左右边界检测结果
-        ax2 = plt.subplot(2, 3, 2)
+        ax2 = plt.subplot(3, 3, 2)
         ax2.imshow(image, cmap='gray')
         
         # 绘制中心线
@@ -99,57 +100,184 @@ class WearVisualizer:
         ax2.set_title('边界检测结果\n蓝色=左边界(撕裂) 绿色=右边界(剪切)', fontsize=12)
         ax2.axis('off')
         
-        # 3. 边界位置序列曲线（左侧）
-        ax3 = plt.subplot(2, 3, 3)
-        ax3.plot(left_edges, 'b-', linewidth=1, label='左边界位置')
-        ax3.axhline(y=np.mean(left_edges), color='r', linestyle='--', 
-                   label=f'均值={np.mean(left_edges):.2f}')
-        ax3.fill_between(range(len(left_edges)), 
-                        np.mean(left_edges) - features['left_rms_roughness'],
-                        np.mean(left_edges) + features['left_rms_roughness'],
-                        alpha=0.3, color='orange', label=f'RMS={features["left_rms_roughness"]:.2f}')
-        ax3.set_xlabel('法线索引')
-        ax3.set_ylabel('相对位置')
-        ax3.set_title(f'左边界位置序列\n峰数={features["left_peak_count"]}', fontsize=12)
+        # 3. 中心线位置序列曲线
+        ax3 = plt.subplot(3, 3, 3)
+        centerline_x = preprocessed['centerline_x']
+        ax3.plot(centerline_x, 'r-', linewidth=1, label='中心线位置')
+        ax3.axhline(y=np.mean(centerline_x), color='b', linestyle='--', 
+                   label=f'均值={np.mean(centerline_x):.2f}')
+        ax3.fill_between(range(len(centerline_x)), 
+                        np.mean(centerline_x) - features['centerline_rms_roughness'],
+                        np.mean(centerline_x) + features['centerline_rms_roughness'],
+                        alpha=0.3, color='orange', label=f'RMS={features["centerline_rms_roughness"]:.2f}')
+        ax3.set_xlabel('行索引', fontsize=10)
+        ax3.set_ylabel('横向位置(像素)', fontsize=10)
+        ax3.set_title('中心线位置序列（核心粗糙度指标）', fontsize=11)
         ax3.legend(fontsize=8)
         ax3.grid(True, alpha=0.3)
         
-        # 4. 边界位置序列曲线（右侧）
-        ax4 = plt.subplot(2, 3, 4)
-        ax4.plot(right_edges, 'g-', linewidth=1, label='右边界位置')
+        # 4. 右边界位置序列 + 峰检测标注
+        ax4 = plt.subplot(3, 3, 4)
+        ax4.plot(right_edges, 'g-', linewidth=1.5, label='右边界位置')
         ax4.axhline(y=np.mean(right_edges), color='r', linestyle='--',
                    label=f'均值={np.mean(right_edges):.2f}')
         ax4.fill_between(range(len(right_edges)),
                         np.mean(right_edges) - features['right_rms_roughness'],
                         np.mean(right_edges) + features['right_rms_roughness'],
                         alpha=0.3, color='orange', label=f'RMS={features["right_rms_roughness"]:.2f}')
-        ax4.set_xlabel('法线索引')
-        ax4.set_ylabel('相对位置')
-        ax4.set_title(f'右边界位置序列\n峰数={features["right_peak_count"]}', fontsize=12)
-        ax4.legend(fontsize=8)
+        
+        # 检测并标注峰值位置
+        from scipy.signal import find_peaks
+        peaks, _ = find_peaks(right_edges, height=np.mean(right_edges), distance=5)
+        if len(peaks) > 0:
+            ax4.plot(peaks, right_edges[peaks], 'r*', markersize=10, 
+                    label=f'检测到峰值 ({len(peaks)}个)', zorder=10)
+        
+        ax4.set_xlabel('法线索引', fontsize=10)
+        ax4.set_ylabel('相对位置', fontsize=10)
+        ax4.set_title(f'右边界位置序列 + 峰检测\n峰数={features["right_peak_count"]}, 峰密度={features["right_peak_density"]:.4f}', 
+                     fontsize=11, fontweight='bold')
+        ax4.legend(fontsize=7, loc='best')
         ax4.grid(True, alpha=0.3)
         
-        # 5. 梯度能量热图
-        ax5 = plt.subplot(2, 3, 5)
+        # 5. 左边界位置序列 + 缺口检测标注
+        ax5 = plt.subplot(3, 3, 5)
+        ax5.plot(left_edges, 'b-', linewidth=1.5, label='左边界位置')
+        
+        # 初始化缺口相关变量
+        notch_idx = 0
+        notch_depth = 0.0
+        
+        # 多项式拟合（用于检测缺口）
+        if len(left_edges) > 3:
+            x_fit = np.arange(len(left_edges))
+            z = np.polyfit(x_fit, left_edges, deg=min(3, len(left_edges)-1))
+            p = np.poly1d(z)
+            fitted_line = p(x_fit)
+            ax5.plot(x_fit, fitted_line, 'r--', linewidth=1.5, label='多项式拟合', alpha=0.7)
+            
+            # 计算残差（缺口 = 实际 - 拟合，负值表示凹陷）
+            residuals = left_edges - fitted_line
+            # 找到最大的负残差（最深的缺口）
+            notch_idx = np.argmin(residuals)
+            notch_depth = abs(residuals[notch_idx])
+            
+            # 标注最大缺口
+            ax5.plot(notch_idx, left_edges[notch_idx], 'r*', markersize=15,
+                    label=f'最大缺口 (深度={notch_depth:.2f})', zorder=10)
+            ax5.annotate(f'缺口\n{notch_depth:.2f}', 
+                        xy=(notch_idx, left_edges[notch_idx]),
+                        xytext=(notch_idx+10, left_edges[notch_idx]-3),
+                        fontsize=9, color='red', fontweight='bold',
+                        arrowprops=dict(arrowstyle='->', color='red', lw=2))
+        
+        ax5.axhline(y=np.mean(left_edges), color='gray', linestyle='--',
+                   label=f'均值={np.mean(left_edges):.2f}', alpha=0.5)
+        ax5.set_xlabel('法线索引', fontsize=10)
+        ax5.set_ylabel('相对位置', fontsize=10)
+        ax5.set_title(f'左边界位置序列 + 缺口检测\n最大缺口深度={features["left_max_notch"]:.3f}', 
+                     fontsize=11, fontweight='bold')
+        ax5.legend(fontsize=7, loc='best')
+        ax5.grid(True, alpha=0.3)
+        
+        # 6. 梯度能量热图
+        ax6 = plt.subplot(3, 3, 6)
         denoised = preprocessed['denoised']
         grad_x = cv2.Sobel(denoised, cv2.CV_64F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(denoised, cv2.CV_64F, 0, 1, ksize=3)
         grad_mag = np.sqrt(grad_x**2 + grad_y**2)
         
-        im = ax5.imshow(grad_mag, cmap='hot')
-        ax5.plot(xs, ys, 'c-', linewidth=1, alpha=0.5)
-        plt.colorbar(im, ax=ax5)
-        ax5.set_title('梯度能量热图', fontsize=12)
-        ax5.axis('off')
-        
-        # 6. 关键特征摘要
-        ax6 = plt.subplot(2, 3, 6)
+        im = ax6.imshow(grad_mag, cmap='hot')
+        ax6.plot(xs, ys, 'c-', linewidth=1, alpha=0.5)
+        plt.colorbar(im, ax=ax6, fraction=0.046)
+        ax6.set_title('梯度能量热图', fontsize=11)
         ax6.axis('off')
+        
+        # 7. 最大缺口在原图上的可视化
+        ax7 = plt.subplot(3, 3, 7)
+        ax7.imshow(image, cmap='gray')
+        
+        # 绘制中心线和左边界
+        ax7.plot(xs, ys, 'r-', linewidth=1.5, alpha=0.5, label='中心线')
+        
+        # 绘制左边界点
+        for i, normal in enumerate(normals):
+            if i < len(left_edges):
+                y = normal['y']
+                x_center = normal['x_center']
+                x_left = x_center + left_edges[i]
+                ax7.plot(x_left, y, 'b.', markersize=1, alpha=0.5)
+        
+        # 标注最大缺口位置（在原图上）
+        if len(left_edges) > 3 and notch_idx < len(normals):
+            notch_normal = normals[notch_idx]
+            y_notch = notch_normal['y']
+            x_center_notch = notch_normal['x_center']
+            x_notch = x_center_notch + left_edges[notch_idx]
+            
+            # 在原图上标注
+            ax7.plot(x_notch, y_notch, 'r*', markersize=20, markeredgewidth=2, 
+                    markeredgecolor='yellow', zorder=10)
+            ax7.annotate(f'最大缺口\n深度={features["max_notch_depth"]:.2f}', 
+                        xy=(x_notch, y_notch),
+                        xytext=(x_notch+20, y_notch+20),
+                        fontsize=10, color='red', fontweight='bold',
+                        bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.8),
+                        arrowprops=dict(arrowstyle='->', color='red', lw=2.5))
+        
+        ax7.set_title(f'最大缺口位置可视化\n左侧最大={features["left_max_notch"]:.3f}, 右侧最大={features["right_max_notch"]:.3f}', 
+                     fontsize=11, fontweight='bold')
+        ax7.legend(fontsize=8)
+        ax7.axis('off')
+        
+        # 8. 剪切面峰值在原图上的可视化
+        ax8 = plt.subplot(3, 3, 8)
+        ax8.imshow(image, cmap='gray')
+        
+        # 绘制中心线和右边界
+        ax8.plot(xs, ys, 'r-', linewidth=1.5, alpha=0.5, label='中心线')
+        
+        # 绘制右边界点
+        for i, normal in enumerate(normals):
+            if i < len(right_edges):
+                y = normal['y']
+                x_center = normal['x_center']
+                x_right = x_center + right_edges[i]
+                ax8.plot(x_right, y, 'g.', markersize=1, alpha=0.5)
+        
+        # 标注峰值位置（在原图上）
+        if len(peaks) > 0:
+            # 只标注前5个最显著的峰
+            peak_heights = right_edges[peaks]
+            top_peaks_idx = np.argsort(peak_heights)[-min(5, len(peaks)):]
+            top_peaks = peaks[top_peaks_idx]
+            
+            for peak_idx in top_peaks:
+                if peak_idx < len(normals):
+                    peak_normal = normals[peak_idx]
+                    y_peak = peak_normal['y']
+                    x_center_peak = peak_normal['x_center']
+                    x_peak = x_center_peak + right_edges[peak_idx]
+                    
+                    ax8.plot(x_peak, y_peak, 'r*', markersize=15, 
+                            markeredgewidth=1.5, markeredgecolor='yellow', zorder=10)
+        
+        ax8.set_title(f'剪切面峰值位置可视化\n峰数={features["right_peak_count"]}, 峰密度={features["right_peak_density"]:.4f}', 
+                     fontsize=11, fontweight='bold')
+        ax8.legend(fontsize=8)
+        ax8.axis('off')
+        
+        # 9. 关键特征摘要
+        ax9 = plt.subplot(3, 3, 9)
+        ax9.axis('off')
         
         summary_text = f"""
 关键特征摘要
 
-【粗糙度】
+【中心线粗糙度（核心指标）】
+中心线RMS: {features['centerline_rms_roughness']:.3f}
+
+【边界粗糙度】
 左侧RMS: {features['left_rms_roughness']:.3f}
 右侧RMS: {features['right_rms_roughness']:.3f}
 平均RMS: {features['avg_rms_roughness']:.3f}
@@ -174,15 +302,17 @@ class WearVisualizer:
 撕裂/剪切: {features['tear_shear_area_ratio']:.3f}
         """
         
-        ax6.text(0.1, 0.95, summary_text, transform=ax6.transAxes,
-                fontsize=10, verticalalignment='top', family='monospace',
+        ax9.text(0.05, 0.95, summary_text, transform=ax9.transAxes,
+                fontsize=9, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
-        plt.tight_layout()
+        plt.suptitle(f'帧 {frame_id} 诊断分析（3×3增强版）', 
+                    fontsize=16, fontweight='bold', y=0.995)
+        plt.tight_layout(rect=[0, 0, 1, 0.99])
         
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"已保存诊断图: {save_path}")
+            # print(f"已保存诊断图: {save_path}")  # 减少打印信息
         
         plt.close()
     

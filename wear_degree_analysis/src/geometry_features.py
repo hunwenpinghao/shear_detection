@@ -786,6 +786,10 @@ class GeometryFeatureExtractor:
         left_rms = self.compute_rms_roughness(left_edges)
         right_rms = self.compute_rms_roughness(right_edges)
         
+        # 1.1 中心线RMS粗糙度（新增）
+        centerline_xs = preprocessed_data.get('centerline_x', np.array([]))
+        centerline_rms = self.compute_rms_roughness(centerline_xs)
+        
         # 2. 梯度能量（左右分别计算）
         left_gradient_energy = self.compute_gradient_energy(image, left_mask)
         right_gradient_energy = self.compute_gradient_energy(image, right_mask)
@@ -836,6 +840,7 @@ class GeometryFeatureExtractor:
             'left_rms_roughness': left_rms,
             'right_rms_roughness': right_rms,
             'avg_rms_roughness': (left_rms + right_rms) / 2,
+            'centerline_rms_roughness': centerline_rms,  # 新增：中心线粗糙度
             
             # 梯度能量（锐度）特征
             'left_gradient_energy': left_gradient_energy,
@@ -923,6 +928,7 @@ class GeometryFeatureExtractor:
             'left_rms_roughness': 0.0,
             'right_rms_roughness': 0.0,
             'avg_rms_roughness': 0.0,
+            'centerline_rms_roughness': 0.0,
             'left_gradient_energy': 0.0,
             'right_gradient_energy': 0.0,
             'avg_gradient_energy': 0.0,
