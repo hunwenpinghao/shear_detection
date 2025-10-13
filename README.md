@@ -933,5 +933,68 @@ python data_process/frame_extractor.py
 
 ---
 
+### 长期趋势图拆分工具 (split_longterm_trend_charts.py)
+
+**位置：** `split_longterm_trend_charts.py`
+
+**功能：** 将包含多个子图的长期趋势图拆分为单独的图表文件，x轴拉长以便更清楚地查看随时间的变化曲线
+
+**特点：**
+- ✅ **支持批量处理**：可同时处理多个目录
+- ✅ **自动化输出**：自动创建输出目录并保存图表
+- ✅ **高分辨率**：默认200 DPI，可自定义
+- ✅ **完整分析**：包含原始数据、散点、线性趋势线和趋势方向标注
+
+**使用方法：**
+```bash
+# 处理单个目录（使用默认路径）
+python split_longterm_trend_charts.py --input_dir data/coil_wear_analysis
+
+# 处理多个目录
+python split_longterm_trend_charts.py --input_dir data/coil_wear_analysis data_video7_20250909110956225/coil_wear_analysis
+
+# 批量处理所有目录（使用 shell 脚本）
+./batch_split_trends.sh
+
+# 自定义分辨率
+python split_longterm_trend_charts.py --input_dir data/coil_wear_analysis --dpi 300
+```
+
+**输入要求：**
+- 需要 `features/wear_features.csv` 文件（由 coil_wear_analysis.py 生成）
+- CSV 文件必须包含以下列：
+  - `frame_id`：帧编号
+  - `avg_rms_roughness`：平均RMS粗糙度
+  - `max_notch_depth`：最大缺口深度
+  - `right_peak_density`：剪切面峰密度
+  - `avg_gradient_energy`：平均梯度能量
+  - `tear_shear_area_ratio`：撕裂/剪切面积比
+
+**输出文件：**
+保存到 `<input_dir>/visualizations/individual_trends/` 目录：
+- `all_trends_6x1.png` - **6×1总图**（80×29英寸，约6.5MB，包含综合磨损指标 + 5个特征）
+- `avg_rms_roughness_trend.png` - 平均RMS粗糙度单独图（60×6英寸，约0.9MB）
+- `max_notch_depth_trend.png` - 最大缺口深度单独图（60×6英寸，约1.1MB）
+- `right_peak_density_trend.png` - 剪切面峰密度单独图（60×6英寸，约1.0MB）
+- `avg_gradient_energy_trend.png` - 平均梯度能量单独图（60×6英寸，约1.1MB）
+- `tear_shear_area_ratio_trend.png` - 撕裂/剪切面积比单独图（60×6英寸，约0.8MB）
+
+**综合指标说明：**
+- 综合磨损指标是将5个特征分别归一化到0-1后取平均值
+- 该指标综合反映了剪刀的整体磨损状况
+- 值越大表示磨损越严重
+- 位于6×1总图的第一个位置，便于快速了解整体趋势
+
+**参数说明：**
+- `--input_dir`：输入主目录路径（可指定多个）
+- `--csv_path`：CSV文件相对路径（默认：features/wear_features.csv）
+- `--output_subdir`：输出子目录相对路径（默认：visualizations/individual_trends）
+- `--dpi`：输出图片分辨率（默认：200）
+
+**集成说明：**
+此功能已集成到 `coil_wear_analysis.py` 中，运行磨损分析时会自动生成单独的趋势图。如果只需要重新生成趋势图而不重新分析，可以单独运行此脚本。
+
+---
+
 **模型信息：** Claude Sonnet 4.5 (claude-sonnet-4-20250514)  
-**更新日期：** 2025年10月10日
+**更新日期：** 2025年10月13日

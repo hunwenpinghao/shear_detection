@@ -770,6 +770,7 @@ class UniversalWearAnalyzer:
         self._plot_feature_correlations(df, os.path.join(viz_dir, 'feature_correlations.png'))
         self._plot_wear_progression(df, os.path.join(viz_dir, 'wear_progression.png'))
         self._plot_longterm_trend(df, os.path.join(viz_dir, 'longterm_trend.png'))
+        self._plot_individual_longterm_trends(df, viz_dir)
         self._plot_recommended_indicators(df, os.path.join(viz_dir, 'recommended_indicators.png'))
         
         # 生成水平梯度能量对比图
@@ -1358,6 +1359,76 @@ class UniversalWearAnalyzer:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         print(f"已保存: {save_path}")
+    
+    def _plot_individual_longterm_trends(self, df: pd.DataFrame, viz_dir: str):
+        """
+        绘制单独的长期趋势图（每个特征一张图）
+        
+        将5个关键特征的长期趋势分别保存为独立的图片文件，
+        x轴拉长以便更清楚地查看随时间的变化曲线
+        """
+        print("\n生成单独的长期趋势图...")
+        
+        # 定义特征及其对应的标签和颜色
+        features_to_plot = [
+            ('avg_rms_roughness', '平均RMS粗糙度', 'blue'),
+            ('max_notch_depth', '最大缺口深度', 'red'),
+            ('right_peak_density', '剪切面峰密度', 'green'),
+            ('avg_gradient_energy', '平均梯度能量', 'purple'),
+            ('tear_shear_area_ratio', '撕裂/剪切面积比', 'orange'),
+        ]
+        
+        # 创建输出目录
+        output_dir = os.path.join(viz_dir, 'individual_trends')
+        ensure_dir(output_dir)
+        
+        for feat, label, color in features_to_plot:
+            if feat not in df.columns:
+                print(f"  警告: 特征 '{feat}' 不存在，跳过")
+                continue
+            
+            # 创建单独的图表，拉长x轴
+            fig, ax = plt.subplots(figsize=(15, 6))
+            
+            # 原始数据连线（半透明）
+            ax.plot(df['frame_id'], df[feat],
+                   alpha=0.3, linewidth=1.2, color=color,
+                   zorder=1, label='逐帧曲线')
+            
+            # 散点标记
+            ax.scatter(df['frame_id'], df[feat],
+                      alpha=0.4, s=15, color=color, zorder=2)
+            
+            # 线性拟合趋势线
+            z = np.polyfit(df['frame_id'], df[feat], 1)
+            p = np.poly1d(z)
+            ax.plot(df['frame_id'], p(df['frame_id']),
+                   color='darkred', linewidth=3, linestyle='--',
+                   zorder=3, label=f'线性趋势: y={z[0]:.6f}x+{z[1]:.2f}')
+            
+            # 计算趋势方向
+            trend = "增加" if z[0] > 0 else "减少"
+            ax.text(0.05, 0.95, f'趋势: {trend}',
+                   transform=ax.transAxes, fontsize=11,
+                   verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            ax.set_xlabel('帧编号', fontsize=12, fontweight='bold')
+            ax.set_ylabel(label, fontsize=12, fontweight='bold')
+            ax.set_title(f'{label} 长期趋势', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            
+            # 调整x轴范围，确保拉长效果
+            ax.set_xlim(df['frame_id'].min(), df['frame_id'].max())
+            
+            # 保存图表
+            individual_save_path = os.path.join(output_dir, f'{feat}_trend.png')
+            plt.savefig(individual_save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+            print(f"  已保存: {feat}_trend.png")
+        
+        print(f"✓ 单独长期趋势图已保存到: {output_dir}")
     
     def _plot_horizontal_gradient_comparison(self, df: pd.DataFrame, save_path: str):
         """绘制水平梯度能量对比图（总梯度 vs 水平梯度）"""
