@@ -38,7 +38,8 @@ def run(skips: List[str], video_path: str, output_dir: str, interval_seconds: in
     burr_dir = os.path.join(output_dir, 'burr_density_curve')
     coil_wear_dir = os.path.join(output_dir, 'coil_wear_analysis')
     spot_temporal_dir = os.path.join(output_dir, 'spot_temporal_analysis')
-    tear_surface_burr_dir = os.path.join(output_dir, 'white_patch_test')
+    tear_surface_burr_dir = os.path.join(output_dir, 'tear_surface_burr_density_analysis')
+    tear_surface_white_patch_dir = os.path.join(output_dir, 'tear_surface_white_patch_analysis')
 
     print(f"\n{'='*80}")
     print(f"开始运行剪刀磨损检测流水线")
@@ -103,6 +104,14 @@ def run(skips: List[str], video_path: str, output_dir: str, interval_seconds: in
         print("✓ Step 7 完成\n")
     else:
         print("⊗ Step 7: 跳过（撕裂面毛刺密度分析）\n")
+
+    # step8 - 撕裂面毛刺密度分析
+    if 'step8' not in skips:
+        print(">>> Step 8: 撕裂面白色斑块分析...")
+        subprocess.run([python_exe, 'tear_surface_white_patch_analyzer.py', '--roi_dir', roi_dir, '--output_dir', tear_surface_white_patch_dir], check=True)
+        print("✓ Step 8 完成\n")
+    else:
+        print("⊗ Step 8: 跳过（撕裂面白色斑块分析）\n")
     
     print(f"\n{'='*80}")
     print(f"流水线运行完成！")

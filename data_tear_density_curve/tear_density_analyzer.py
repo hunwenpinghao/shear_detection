@@ -238,7 +238,7 @@ class TearDensityAnalyzer:
         # 默认使用新的等高线方法，可通过参数控制
         detector = ShearTearDetector(use_contour_method=use_contour_method)
         
-        skip_step1 = True
+        skip_step1 = False
         if not skip_step1:
             # 第一步：生成撕裂面mask（before fill + after fill）
             print("\n第一步：生成撕裂面mask...")
@@ -298,7 +298,7 @@ class TearDensityAnalyzer:
             print(f"  - 共计算 {len(detection_results)} 个撕裂面（所有帧）")
             print(f"  - 共保存 {step1_count} 个可视化mask（采样间隔: {visualization_interval}）")
         
-        skip_step2 = True
+        skip_step2 = False
         if not skip_step2:
             # 第二步：应用撕裂面mask过滤出原图的撕裂面区域，并提取斑块图
             print("\n第二步：提取撕裂面区域和斑块图...")

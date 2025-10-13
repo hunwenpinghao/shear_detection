@@ -315,7 +315,7 @@ class TearTextureDensityAnalyzer:
         # 默认使用新的等高线方法，可通过参数控制
         detector = ShearTearDetector(use_contour_method=use_contour_method)
         
-        skip_step1 = True
+        skip_step1 = False
         if not skip_step1:
             # 第一步：生成撕裂面mask（before fill + after fill）
             print("\n第一步：生成撕裂面mask...")
