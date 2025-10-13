@@ -169,15 +169,16 @@ def _generate_combined_plot_6x1(df: pd.DataFrame, features_to_plot: list, output
     # 创建6×1子图布局，x轴缩小为80英寸（第1个为综合指标，后5个为各特征）
     fig, axes = plt.subplots(6, 1, figsize=(80, 29))
     
-    # ========== 第1个子图：综合指标（5个特征归一化后叠加） ==========
+    # ========== 第1个子图：综合指标（4个特征归一化后叠加，不含梯度能量） ==========
     ax_composite = axes[0]
     
-    # 计算综合指标
+    # 计算综合指标 - 排除 avg_gradient_energy
     composite_score = np.zeros(len(df))
     valid_features = []
+    excluded_features = ['avg_gradient_energy']  # 排除的特征
     
     for feat, label, color in features_to_plot:
-        if feat in df.columns:
+        if feat in df.columns and feat not in excluded_features:
             # 归一化到0-1
             values = df[feat].values
             if values.max() > values.min():
@@ -236,7 +237,7 @@ def _generate_combined_plot_6x1(df: pd.DataFrame, features_to_plot: list, output
     
     ax_composite.set_xlabel('帧编号', fontsize=13, fontweight='bold')
     ax_composite.set_ylabel('综合磨损指标 (归一化)', fontsize=13, fontweight='bold')
-    ax_composite.set_title('综合磨损指标 (5特征归一化叠加)', fontsize=16, fontweight='bold', pad=15, 
+    ax_composite.set_title('综合磨损指标 (4特征归一化叠加: 不含梯度能量)', fontsize=16, fontweight='bold', pad=15, 
                           bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
     ax_composite.grid(True, alpha=0.3)
     ax_composite.legend(loc='upper left', fontsize=11)
@@ -302,7 +303,7 @@ def _generate_combined_plot_6x1(df: pd.DataFrame, features_to_plot: list, output
         ax.set_xlim(df['frame_id'].min(), df['frame_id'].max())
     
     # 设置总标题
-    fig.suptitle('剪刀磨损长期趋势综合分析（综合指标 + 5特征对比）', 
+    fig.suptitle('剪刀磨损长期趋势综合分析（综合指标[4特征] + 5特征详情）', 
                 fontsize=18, fontweight='bold', y=0.996)
     
     # 调整子图间距
