@@ -92,11 +92,14 @@ class ImagePreprocessor:
         xs = np.array(xs, dtype=np.float64)
         ys = np.array(ys, dtype=np.float64)
         
+        # 保存原始中心线（未平滑）
+        xs_raw = xs.copy()
+        
         # 使用Savitzky-Golay滤波平滑中心线
         if len(xs) > self.savgol_window:
             xs = savgol_filter(xs, self.savgol_window, self.savgol_order)
         
-        return xs, ys
+        return xs, ys, xs_raw
     
     def create_roi_masks(self, image: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -238,8 +241,8 @@ class ImagePreprocessor:
         # 1. 去噪
         denoised = self.denoise(image)
         
-        # 2. 检测中心线
-        xs, ys = self.detect_centerline(denoised)
+        # 2. 检测中心线（同时返回平滑和原始）
+        xs, ys, xs_raw = self.detect_centerline(denoised)
         
         if len(xs) == 0:
             return {
@@ -259,7 +262,8 @@ class ImagePreprocessor:
         return {
             'success': True,
             'denoised': denoised,
-            'centerline_x': xs,
+            'centerline_x': xs,  # 平滑后的中心线（用于ROI分割）
+            'centerline_x_raw': xs_raw,  # 原始中心线（用于缺口/峰检测和可视化）
             'centerline_y': ys,
             'left_mask': left_mask,
             'right_mask': right_mask,

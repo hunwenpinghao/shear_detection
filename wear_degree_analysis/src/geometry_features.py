@@ -182,22 +182,23 @@ class GeometryFeatureExtractor:
     
     def compute_area_ratio(self, left_mask: np.ndarray, right_mask: np.ndarray) -> float:
         """
-        计算撕裂区与剪切区的面积比
+        计算撕裂面占比（撕裂面面积 / 总面积）
         
         Args:
             left_mask: 左侧（撕裂面）掩码
             right_mask: 右侧（剪切面）掩码
             
         Returns:
-            面积比（撕裂区面积 / 剪切区面积）
+            撕裂面占比（0-1之间，撕裂面面积 / (撕裂面面积 + 剪切面面积)）
         """
         left_area = np.sum(left_mask > 0)
         right_area = np.sum(right_mask > 0)
+        total_area = left_area + right_area
         
-        if right_area == 0:
+        if total_area == 0:
             return 0.0
         
-        ratio = float(left_area / right_area)
+        ratio = float(left_area / total_area)
         
         return ratio
     
@@ -501,6 +502,69 @@ class GeometryFeatureExtractor:
             'spectral_centroid': spectral_centroid
         }
     
+    def compute_centerline_notch_and_peaks(self, centerline_x: np.ndarray) -> Dict[str, float]:
+        """
+        基于原始中心线计算缺口和峰的特征
+        
+        物理意义：
+        - 缺口：撕裂面（左侧）的凹陷 → 中心线向左的平滑弯曲
+        - 峰：剪切面（右侧）向撕裂面方向的突起 → 中心线向左的尖锐突出
+        
+        Args:
+            centerline_x: 原始中心线x坐标序列（未平滑）
+            
+        Returns:
+            包含缺口和峰特征的字典
+        """
+        if len(centerline_x) < 4:
+            return {
+                'centerline_max_notch_depth': 0.0,
+                'centerline_notch_idx': 0,
+                'centerline_peak_count': 0,
+                'centerline_peak_density': 0.0,
+                'centerline_avg_peak_prominence': 0.0
+            }
+        
+        # 多项式拟合中心线作为基准
+        x_fit = np.arange(len(centerline_x))
+        z = np.polyfit(x_fit, centerline_x, deg=min(3, len(centerline_x)-1))
+        p = np.poly1d(z)
+        fitted_centerline = p(x_fit)
+        
+        # 计算残差
+        residuals = centerline_x - fitted_centerline
+        
+        # 1. 检测缺口：找负残差中的波谷（最小值）
+        notch_idx = int(np.argmin(residuals))
+        notch_depth = float(abs(residuals[notch_idx]))
+        
+        # 2. 检测峰：在负残差中找波峰
+        # 反转残差，使得"向左突出"变成波峰
+        inverted_residuals = -residuals
+        
+        # 找波峰
+        peaks, properties = find_peaks(inverted_residuals, prominence=1.0, distance=10)
+        
+        # 只保留原本是负残差的峰（即中心线向左的突起）
+        valid_peaks = []
+        valid_prominences = []
+        for i, peak_idx in enumerate(peaks):
+            if residuals[peak_idx] < 0:  # 必须是负残差（向左）
+                valid_peaks.append(peak_idx)
+                valid_prominences.append(properties['prominences'][i])
+        
+        peak_count = len(valid_peaks)
+        peak_density = float(peak_count / len(centerline_x)) if len(centerline_x) > 0 else 0.0
+        avg_prominence = float(np.mean(valid_prominences)) if len(valid_prominences) > 0 else 0.0
+        
+        return {
+            'centerline_max_notch_depth': notch_depth,
+            'centerline_notch_idx': notch_idx,
+            'centerline_peak_count': peak_count,
+            'centerline_peak_density': peak_density,
+            'centerline_avg_peak_prominence': avg_prominence
+        }
+    
     def compute_white_patch_features(self, image: np.ndarray, mask: np.ndarray) -> Dict[str, float]:
         """
         计算撕裂面白色斑块特征（4种检测方法 × 4种量化指标）
@@ -790,6 +854,10 @@ class GeometryFeatureExtractor:
         centerline_xs = preprocessed_data.get('centerline_x', np.array([]))
         centerline_rms = self.compute_rms_roughness(centerline_xs)
         
+        # 1.2 基于原始中心线的缺口和峰检测（新增）
+        centerline_xs_raw = preprocessed_data.get('centerline_x_raw', centerline_xs)
+        centerline_features = self.compute_centerline_notch_and_peaks(centerline_xs_raw)
+        
         # 2. 梯度能量（左右分别计算）
         left_gradient_energy = self.compute_gradient_energy(image, left_mask)
         right_gradient_energy = self.compute_gradient_energy(image, right_mask)
@@ -856,6 +924,13 @@ class GeometryFeatureExtractor:
             'left_max_notch': left_notch,
             'right_max_notch': right_notch,
             'max_notch_depth': max(left_notch, right_notch),
+            
+            # 中心线缺口和峰特征（基于原始中心线）
+            'centerline_max_notch_depth': centerline_features['centerline_max_notch_depth'],
+            'centerline_notch_idx': centerline_features['centerline_notch_idx'],
+            'centerline_peak_count': centerline_features['centerline_peak_count'],
+            'centerline_peak_density': centerline_features['centerline_peak_density'],
+            'centerline_avg_peak_prominence': centerline_features['centerline_avg_peak_prominence'],
             
             # 峰统计特征（撕裂面）
             'left_peak_count': left_peak_stats['peak_count'],

@@ -8,8 +8,10 @@ import matplotlib.pyplot as plt
 import matplotlib
 import seaborn as sns
 import pandas as pd
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import os
+from scipy.ndimage import maximum_filter1d, minimum_filter1d
+from scipy.interpolate import UnivariateSpline
 
 # 设置中文字体 - 多个备选方案确保兼容性
 matplotlib.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'Songti SC', 'STSong', 'SimHei', 'DejaVu Sans', 'sans-serif']
@@ -17,6 +19,146 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 # 强制使用TrueType字体，避免字符丢失
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
+
+
+def compute_envelope(signal: np.ndarray, window: int = 15) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    计算信号的上下包络线
+    
+    Args:
+        signal: 输入信号
+        window: 滑动窗口大小
+        
+    Returns:
+        upper_envelope: 上包络线
+        lower_envelope: 下包络线
+    """
+    if len(signal) < window:
+        return signal.copy(), signal.copy()
+    
+    # 使用最大/最小滤波器计算包络
+    upper_envelope = maximum_filter1d(signal, size=window, mode='nearest')
+    lower_envelope = minimum_filter1d(signal, size=window, mode='nearest')
+    
+    return upper_envelope, lower_envelope
+
+
+def robust_curve_fit(signal: np.ndarray, percentile_range: Tuple[float, float] = (5, 95),
+                     smoothing: float = None, use_local_filter: bool = True, 
+                     local_window: int = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    鲁棒曲线拟合：去除离群点后用样条曲线拟合
+    
+    优化策略（2025-10-14更新）：
+    - 自适应平滑参数（根据数据变异系数调整）
+    - 对稀疏峰值数据使用更小的平滑参数
+    - **滑动窗口局部离群点检测**（避免将局部凹陷区域的所有点标记为离群点）
+    
+    Args:
+        signal: 输入信号
+        percentile_range: 保留数据的百分位范围（用于全局粗筛选）
+        smoothing: 样条平滑参数（None表示自动）
+        use_local_filter: 是否使用局部滑动窗口过滤（推荐True）
+        local_window: 局部窗口大小（None表示自动）
+        
+    Returns:
+        fitted_curve: 拟合曲线
+        inlier_mask: 内点掩码（True表示非离群点）
+        density_score: 点密度得分（用于可视化）
+    """
+    if len(signal) < 10:
+        return signal.copy(), np.ones(len(signal), dtype=bool), np.ones(len(signal))
+    
+    # === 第1阶段：全局粗筛选（去除极端离群点） ===
+    lower_bound = np.percentile(signal, percentile_range[0])
+    upper_bound = np.percentile(signal, percentile_range[1])
+    global_inlier_mask = (signal >= lower_bound) & (signal <= upper_bound)
+    
+    # === 第2阶段：局部滑动窗口精细过滤 ===
+    if use_local_filter:
+        # 自动确定窗口大小
+        if local_window is None:
+            local_window = max(min(len(signal) // 15, 101), 21)
+            if local_window % 2 == 0:
+                local_window += 1
+        
+        # 初始化局部内点掩码
+        local_inlier_mask = np.ones(len(signal), dtype=bool)
+        
+        # 滑动窗口检测
+        half_window = local_window // 2
+        for i in range(len(signal)):
+            start = max(0, i - half_window)
+            end = min(len(signal), i + half_window + 1)
+            
+            window_mask = global_inlier_mask[start:end]
+            window_data = signal[start:end][window_mask]
+            
+            if len(window_data) < 3:
+                continue
+            
+            local_mean = np.mean(window_data)
+            local_std = np.std(window_data)
+            
+            # 3-sigma规则
+            if local_std > 0:
+                z_score = abs(signal[i] - local_mean) / local_std
+                if z_score > 3.0:
+                    local_inlier_mask[i] = False
+        
+        # 综合全局和局部掩码
+        inlier_mask = global_inlier_mask & local_inlier_mask
+    else:
+        inlier_mask = global_inlier_mask
+    
+    # === 计算密度得分（可视化用） ===
+    density_window = min(21, len(signal) // 5)
+    if density_window % 2 == 0:
+        density_window += 1
+    
+    density_score = np.zeros(len(signal))
+    for i in range(len(signal)):
+        start = max(0, i - density_window // 2)
+        end = min(len(signal), i + density_window // 2 + 1)
+        local_vals = signal[start:end]
+        local_var = np.var(local_vals)
+        density_score[i] = 1.0 / (local_var + 1e-6)
+    
+    density_score = (density_score - density_score.min()) / (density_score.max() - density_score.min() + 1e-6)
+    
+    # === 第3阶段：样条曲线拟合 ===
+    x_inliers = np.where(inlier_mask)[0]
+    y_inliers = signal[inlier_mask]
+    
+    if len(x_inliers) < 4:
+        fitted_curve = np.full(len(signal), np.mean(signal))
+        return fitted_curve, inlier_mask, density_score
+    
+    # 自动计算平滑参数（自适应策略）
+    if smoothing is None:
+        mean_val = np.abs(np.mean(y_inliers)) + 1e-10
+        std_val = np.std(y_inliers)
+        cv = std_val / mean_val
+        
+        if cv > 0.5:
+            smoothing = len(x_inliers) * 0.05
+        elif cv > 0.2:
+            smoothing = len(x_inliers) * 0.15
+        else:
+            smoothing = len(x_inliers) * 0.3
+    
+    try:
+        spline = UnivariateSpline(x_inliers, y_inliers, s=smoothing, k=3)
+        x_full = np.arange(len(signal))
+        fitted_curve = spline(x_full)
+    except:
+        degree = min(3, len(x_inliers) - 1)
+        coeffs = np.polyfit(x_inliers, y_inliers, degree)
+        poly = np.poly1d(coeffs)
+        x_full = np.arange(len(signal))
+        fitted_curve = poly(x_full)
+    
+    return fitted_curve, inlier_mask, density_score
 
 
 class WearVisualizer:
@@ -38,7 +180,9 @@ class WearVisualizer:
                                         frame_id: int,
                                         save_path: Optional[str] = None) -> None:
         """
-        生成单帧诊断图
+        生成单帧诊断图（3×3增强版）
+        
+        基于原始中心线检测缺口和峰，用红色mask标注
         
         Args:
             image: 原始图像
@@ -51,7 +195,13 @@ class WearVisualizer:
             print(f"帧 {frame_id} 预处理失败，跳过可视化")
             return
         
-        # 扩展为 3×3 布局以增加更多可视化
+        from scipy.signal import find_peaks
+        
+        # 获取数据
+        centerline_x_smooth = np.array(preprocessed.get('centerline_x', []))
+        centerline_x = np.array(preprocessed.get('centerline_x_raw', centerline_x_smooth))  # 使用原始中心线
+        
+        # 创建3×3布局
         fig = plt.figure(figsize=(24, 18))
         
         # 1. 原图 + 中心线 + 法线网格
@@ -100,84 +250,146 @@ class WearVisualizer:
         ax2.set_title('边界检测结果\n蓝色=左边界(撕裂) 绿色=右边界(剪切)', fontsize=12)
         ax2.axis('off')
         
-        # 3. 中心线位置序列曲线
+        # 3. 中心线位置序列（核心粗糙度指标）+ 包络线 + 鲁棒拟合
         ax3 = plt.subplot(3, 3, 3)
-        centerline_x = preprocessed['centerline_x']
-        ax3.plot(centerline_x, 'r-', linewidth=1, label='中心线位置')
-        ax3.axhline(y=np.mean(centerline_x), color='b', linestyle='--', 
-                   label=f'均值={np.mean(centerline_x):.2f}')
-        ax3.fill_between(range(len(centerline_x)), 
-                        np.mean(centerline_x) - features['centerline_rms_roughness'],
-                        np.mean(centerline_x) + features['centerline_rms_roughness'],
-                        alpha=0.3, color='orange', label=f'RMS={features["centerline_rms_roughness"]:.2f}')
-        ax3.set_xlabel('行索引', fontsize=10)
-        ax3.set_ylabel('横向位置(像素)', fontsize=10)
-        ax3.set_title('中心线位置序列（核心粗糙度指标）', fontsize=11)
-        ax3.legend(fontsize=8)
+        if len(centerline_x) > 0:
+            # 原始中心线（半透明）
+            ax3.plot(centerline_x, 'b-', linewidth=0.8, label='原始中心线', alpha=0.4)
+            
+            # 计算包络线
+            upper_env, lower_env = compute_envelope(centerline_x, window=15)
+            ax3.plot(upper_env, 'r:', linewidth=1.5, label='上包络', alpha=0.7)
+            ax3.plot(lower_env, 'g:', linewidth=1.5, label='下包络', alpha=0.7)
+            ax3.fill_between(range(len(centerline_x)), lower_env, upper_env, 
+                           alpha=0.1, color='gray', label='包络范围')
+            
+            # 鲁棒拟合曲线（去除离群点）
+            fitted_curve, inlier_mask, density_score = robust_curve_fit(centerline_x)
+            ax3.plot(fitted_curve, 'purple', linewidth=2, label='鲁棒拟合', alpha=0.8)
+            
+            # 标注离群点
+            outlier_indices = np.where(~inlier_mask)[0]
+            if len(outlier_indices) > 0:
+                ax3.scatter(outlier_indices, centerline_x[outlier_indices], 
+                          c='orange', s=20, marker='x', alpha=0.6, label=f'离群点({len(outlier_indices)}个)')
+            
+            # 均值线
+            mean_centerline = np.mean(centerline_x)
+            ax3.axhline(y=mean_centerline, color='gray', linestyle='--',
+                       linewidth=1, alpha=0.5)
+            
+            # 标注RMS粗糙度
+            rms = features.get('centerline_rms_roughness', 0)
+            ax3.text(0.02, 0.98, f'RMS粗糙度: {rms:.3f}\n内点率: {inlier_mask.sum()/len(inlier_mask)*100:.1f}%',
+                    transform=ax3.transAxes, fontsize=9, fontweight='bold',
+                    verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
+        
+        ax3.set_xlabel('法线索引', fontsize=10)
+        ax3.set_ylabel('横向位置 (像素)', fontsize=10)
+        ax3.set_title(f'中心线位置序列（核心粗糙度指标）\nRMS={features.get("centerline_rms_roughness", 0):.3f}',
+                     fontsize=11, fontweight='bold')
+        ax3.legend(fontsize=7, loc='best', ncol=2)
         ax3.grid(True, alpha=0.3)
         
-        # 4. 右边界位置序列 + 峰检测标注
+        # 4. 中心线位置序列 + 峰检测（基于原始中心线）+ 包络线
         ax4 = plt.subplot(3, 3, 4)
-        ax4.plot(right_edges, 'g-', linewidth=1.5, label='右边界位置')
-        ax4.axhline(y=np.mean(right_edges), color='r', linestyle='--',
-                   label=f'均值={np.mean(right_edges):.2f}')
-        ax4.fill_between(range(len(right_edges)),
-                        np.mean(right_edges) - features['right_rms_roughness'],
-                        np.mean(right_edges) + features['right_rms_roughness'],
-                        alpha=0.3, color='orange', label=f'RMS={features["right_rms_roughness"]:.2f}')
         
-        # 检测并标注峰值位置
-        from scipy.signal import find_peaks
-        peaks, _ = find_peaks(right_edges, height=np.mean(right_edges), distance=5)
-        if len(peaks) > 0:
-            ax4.plot(peaks, right_edges[peaks], 'r*', markersize=10, 
-                    label=f'检测到峰值 ({len(peaks)}个)', zorder=10)
+        peak_count = features.get('centerline_peak_count', 0)
+        peak_density = features.get('centerline_peak_density', 0.0)
+        
+        if len(centerline_x) > 0:
+            # 原始中心线（半透明）
+            ax4.plot(centerline_x, 'g-', linewidth=0.8, label='原始中心线', alpha=0.4)
+            
+            # 计算包络线
+            upper_env, lower_env = compute_envelope(centerline_x, window=15)
+            ax4.plot(upper_env, 'r:', linewidth=1.5, label='上包络', alpha=0.7)
+            ax4.plot(lower_env, 'b:', linewidth=1.5, label='下包络', alpha=0.7)
+            ax4.fill_between(range(len(centerline_x)), lower_env, upper_env, 
+                           alpha=0.1, color='green', label='包络范围')
+            
+            # 鲁棒拟合曲线
+            fitted_curve, inlier_mask, _ = robust_curve_fit(centerline_x)
+            ax4.plot(fitted_curve, 'orange', linewidth=2, label='鲁棒拟合', alpha=0.8)
+            
+            # 重新检测峰以标注位置（基于原始数据）
+            if len(centerline_x) > 3:
+                x_fit = np.arange(len(centerline_x))
+                z = np.polyfit(x_fit, centerline_x, deg=min(3, len(centerline_x)-1))
+                p = np.poly1d(z)
+                fitted_centerline = p(x_fit)
+                residuals = centerline_x - fitted_centerline
+                inverted_residuals = -residuals
+                peaks, properties = find_peaks(inverted_residuals, prominence=1.0, distance=10)
+                
+                # 只保留负残差的峰
+                valid_peaks = [pk for pk in peaks if residuals[pk] < 0]
+                if len(valid_peaks) > 0:
+                    peak_heights = [centerline_x[int(p)] for p in valid_peaks]
+                    ax4.plot(valid_peaks, peak_heights, 'r*', markersize=12,
+                            label=f'检测到{len(valid_peaks)}个峰', zorder=10,
+                            markeredgecolor='darkred', markeredgewidth=1)
+            
+            # 标注峰密度
+            ax4.text(0.02, 0.98, 
+                    f'峰数量: {peak_count}\n峰密度: {peak_density:.4f}',
+                    transform=ax4.transAxes, fontsize=9, fontweight='bold',
+                    verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
         
         ax4.set_xlabel('法线索引', fontsize=10)
-        ax4.set_ylabel('相对位置', fontsize=10)
-        ax4.set_title(f'右边界位置序列 + 峰检测\n峰数={features["right_peak_count"]}, 峰密度={features["right_peak_density"]:.4f}', 
+        ax4.set_ylabel('横向位置 (像素)', fontsize=10)
+        ax4.set_title('中心线位置序列 + 峰检测\n（剪切面微缺口）',
                      fontsize=11, fontweight='bold')
-        ax4.legend(fontsize=7, loc='best')
+        ax4.legend(fontsize=7, loc='best', ncol=2)
         ax4.grid(True, alpha=0.3)
         
-        # 5. 左边界位置序列 + 缺口检测标注
+        # 5. 中心线位置序列 + 缺口检测（基于原始中心线）+ 包络线
         ax5 = plt.subplot(3, 3, 5)
-        ax5.plot(left_edges, 'b-', linewidth=1.5, label='左边界位置')
         
-        # 初始化缺口相关变量
-        notch_idx = 0
-        notch_depth = 0.0
+        notch_depth = features.get('centerline_max_notch_depth', 0.0)
+        notch_idx = int(features.get('centerline_notch_idx', 0))
         
-        # 多项式拟合（用于检测缺口）
-        if len(left_edges) > 3:
-            x_fit = np.arange(len(left_edges))
-            z = np.polyfit(x_fit, left_edges, deg=min(3, len(left_edges)-1))
+        if len(centerline_x) > 3:
+            # 原始中心线（半透明）
+            ax5.plot(centerline_x, 'b-', linewidth=0.8, label='原始中心线', alpha=0.4)
+            
+            # 计算包络线
+            upper_env, lower_env = compute_envelope(centerline_x, window=15)
+            ax5.plot(upper_env, 'r:', linewidth=1.5, label='上包络', alpha=0.7)
+            ax5.plot(lower_env, 'g:', linewidth=1.5, label='下包络', alpha=0.7)
+            ax5.fill_between(range(len(centerline_x)), lower_env, upper_env, 
+                           alpha=0.1, color='blue', label='包络范围')
+            
+            # 鲁棒拟合曲线（主趋势线）
+            fitted_curve, inlier_mask, _ = robust_curve_fit(centerline_x)
+            ax5.plot(fitted_curve, 'purple', linewidth=2, label='鲁棒拟合', alpha=0.8)
+            
+            # 多项式拟合（用于检测缺口）
+            x_fit = np.arange(len(centerline_x))
+            z = np.polyfit(x_fit, centerline_x, deg=min(3, len(centerline_x)-1))
             p = np.poly1d(z)
             fitted_line = p(x_fit)
-            ax5.plot(x_fit, fitted_line, 'r--', linewidth=1.5, label='多项式拟合', alpha=0.7)
-            
-            # 计算残差（缺口 = 实际 - 拟合，负值表示凹陷）
-            residuals = left_edges - fitted_line
-            # 找到最大的负残差（最深的缺口）
-            notch_idx = np.argmin(residuals)
-            notch_depth = abs(residuals[notch_idx])
+            ax5.plot(x_fit, fitted_line, 'orange', linestyle='--', linewidth=1.5, 
+                    label='多项式基准', alpha=0.6)
             
             # 标注最大缺口
-            ax5.plot(notch_idx, left_edges[notch_idx], 'r*', markersize=15,
-                    label=f'最大缺口 (深度={notch_depth:.2f})', zorder=10)
-            ax5.annotate(f'缺口\n{notch_depth:.2f}', 
-                        xy=(notch_idx, left_edges[notch_idx]),
-                        xytext=(notch_idx+10, left_edges[notch_idx]-3),
-                        fontsize=9, color='red', fontweight='bold',
-                        arrowprops=dict(arrowstyle='->', color='red', lw=2))
+            if notch_depth > 0 and notch_idx < len(centerline_x):
+                ax5.plot(notch_idx, centerline_x[notch_idx], 'r*', markersize=15,
+                        label=f'最大缺口', zorder=10,
+                        markeredgecolor='darkred', markeredgewidth=1)
+                # 简化标注，只显示数值，紧靠五角星
+                ax5.text(notch_idx + 5, centerline_x[notch_idx] - 1, 
+                        f'{notch_depth:.1f}',
+                        fontsize=10, color='red', fontweight='bold',
+                        va='top', ha='left')
         
-        ax5.axhline(y=np.mean(left_edges), color='gray', linestyle='--',
-                   label=f'均值={np.mean(left_edges):.2f}', alpha=0.5)
         ax5.set_xlabel('法线索引', fontsize=10)
-        ax5.set_ylabel('相对位置', fontsize=10)
-        ax5.set_title(f'左边界位置序列 + 缺口检测\n最大缺口深度={features["left_max_notch"]:.3f}', 
+        ax5.set_ylabel('横向位置 (像素)', fontsize=10)
+        ax5.set_title(f'中心线位置序列 + 缺口检测\n最大缺口深度={notch_depth:.3f}',
                      fontsize=11, fontweight='bold')
-        ax5.legend(fontsize=7, loc='best')
+        ax5.legend(fontsize=7, loc='best', ncol=2)
         ax5.grid(True, alpha=0.3)
         
         # 6. 梯度能量热图
@@ -187,84 +399,99 @@ class WearVisualizer:
         grad_y = cv2.Sobel(denoised, cv2.CV_64F, 0, 1, ksize=3)
         grad_mag = np.sqrt(grad_x**2 + grad_y**2)
         
+        # 使用原始宽高比，不要auto拉伸
         im = ax6.imshow(grad_mag, cmap='hot')
-        ax6.plot(xs, ys, 'c-', linewidth=1, alpha=0.5)
-        plt.colorbar(im, ax=ax6, fraction=0.046)
-        ax6.set_title('梯度能量热图', fontsize=11)
+        plt.colorbar(im, ax=ax6, fraction=0.046, pad=0.04)
+        ax6.set_title(f'梯度能量热图\n平均值={features.get("avg_gradient_energy", 0):.1f}',
+                     fontsize=11, fontweight='bold')
         ax6.axis('off')
         
-        # 7. 最大缺口在原图上的可视化
+        # 7. 最大缺口位置可视化（基于中心线 + 红色mask标注）
         ax7 = plt.subplot(3, 3, 7)
-        ax7.imshow(image, cmap='gray')
         
-        # 绘制中心线和左边界
-        ax7.plot(xs, ys, 'r-', linewidth=1.5, alpha=0.5, label='中心线')
+        # 复制图像用于绘制
+        if len(image.shape) == 2:
+            display_img1 = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        else:
+            display_img1 = image.copy()
         
-        # 绘制左边界点
-        for i, normal in enumerate(normals):
-            if i < len(left_edges):
-                y = normal['y']
-                x_center = normal['x_center']
-                x_left = x_center + left_edges[i]
-                ax7.plot(x_left, y, 'b.', markersize=1, alpha=0.5)
+        # 绘制原始中心线（青色）
+        for y_idx in range(len(centerline_x)):
+            x_pos = int(centerline_x[y_idx])
+            if 0 <= x_pos < display_img1.shape[1] and 0 <= y_idx < display_img1.shape[0]:
+                display_img1[y_idx, x_pos] = [0, 255, 255]  # 青色中心线
         
-        # 标注最大缺口位置（在原图上）
-        if len(left_edges) > 3 and notch_idx < len(normals):
-            notch_normal = normals[notch_idx]
-            y_notch = notch_normal['y']
-            x_center_notch = notch_normal['x_center']
-            x_notch = x_center_notch + left_edges[notch_idx]
+        # 标注最大缺口（红色mask）
+        if notch_depth > 0 and notch_idx < len(centerline_x):
+            notch_y = notch_idx
+            notch_x = int(centerline_x[notch_idx])
             
-            # 在原图上标注
-            ax7.plot(x_notch, y_notch, 'r*', markersize=20, markeredgewidth=2, 
-                    markeredgecolor='yellow', zorder=10)
-            ax7.annotate(f'最大缺口\n深度={features["max_notch_depth"]:.2f}', 
-                        xy=(x_notch, y_notch),
-                        xytext=(x_notch+20, y_notch+20),
-                        fontsize=10, color='red', fontweight='bold',
-                        bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.8),
-                        arrowprops=dict(arrowstyle='->', color='red', lw=2.5))
+            # 涂红色区域（在缺口位置向左涂）
+            radius = 8
+            for dy in range(-radius, radius+1):
+                y_pos = notch_y + dy
+                if 0 <= y_pos < len(centerline_x) and 0 <= y_pos < display_img1.shape[0]:
+                    x_pos = int(centerline_x[y_pos])
+                    if 0 <= x_pos < display_img1.shape[1]:
+                        # 向左涂6个像素
+                        for dx in range(-5, 1):
+                            if 0 <= x_pos + dx < display_img1.shape[1]:
+                                display_img1[y_pos, x_pos + dx] = [255, 0, 0]  # 红色
         
-        ax7.set_title(f'最大缺口位置可视化\n左侧最大={features["left_max_notch"]:.3f}, 右侧最大={features["right_max_notch"]:.3f}', 
-                     fontsize=11, fontweight='bold')
-        ax7.legend(fontsize=8)
+        ax7.imshow(display_img1)
+        ax7.set_title(f'最大缺口位置可视化\n深度={notch_depth:.2f}像素', 
+                     fontsize=13, fontweight='bold')
         ax7.axis('off')
         
-        # 8. 剪切面峰值在原图上的可视化
+        # 8. 剪切面峰值位置可视化（基于中心线 + 红色mask标注）
         ax8 = plt.subplot(3, 3, 8)
-        ax8.imshow(image, cmap='gray')
         
-        # 绘制中心线和右边界
-        ax8.plot(xs, ys, 'r-', linewidth=1.5, alpha=0.5, label='中心线')
+        # 复制图像用于绘制
+        if len(image.shape) == 2:
+            display_img2 = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        else:
+            display_img2 = image.copy()
         
-        # 绘制右边界点
-        for i, normal in enumerate(normals):
-            if i < len(right_edges):
-                y = normal['y']
-                x_center = normal['x_center']
-                x_right = x_center + right_edges[i]
-                ax8.plot(x_right, y, 'g.', markersize=1, alpha=0.5)
+        # 绘制原始中心线（青色）
+        for y_idx in range(len(centerline_x)):
+            x_pos = int(centerline_x[y_idx])
+            if 0 <= x_pos < display_img2.shape[1] and 0 <= y_idx < display_img2.shape[0]:
+                display_img2[y_idx, x_pos] = [0, 255, 255]  # 青色中心线
         
-        # 标注峰值位置（在原图上）
-        if len(peaks) > 0:
-            # 只标注前5个最显著的峰
-            peak_heights = right_edges[peaks]
-            top_peaks_idx = np.argsort(peak_heights)[-min(5, len(peaks)):]
-            top_peaks = peaks[top_peaks_idx]
+        # 重新检测峰值位置（用于可视化）
+        valid_peak_indices = []
+        if len(centerline_x) > 3:
+            x_fit = np.arange(len(centerline_x))
+            z = np.polyfit(x_fit, centerline_x, deg=min(3, len(centerline_x)-1))
+            p = np.poly1d(z)
+            fitted_centerline = p(x_fit)
+            residuals = centerline_x - fitted_centerline
+            inverted_residuals = -residuals
+            peaks, properties = find_peaks(inverted_residuals, prominence=1.0, distance=10)
             
-            for peak_idx in top_peaks:
-                if peak_idx < len(normals):
-                    peak_normal = normals[peak_idx]
-                    y_peak = peak_normal['y']
-                    x_center_peak = peak_normal['x_center']
-                    x_peak = x_center_peak + right_edges[peak_idx]
-                    
-                    ax8.plot(x_peak, y_peak, 'r*', markersize=15, 
-                            markeredgewidth=1.5, markeredgecolor='yellow', zorder=10)
+            # 只保留负残差的峰
+            valid_peak_indices = [pk for pk in peaks if residuals[pk] < 0]
         
-        ax8.set_title(f'剪切面峰值位置可视化\n峰数={features["right_peak_count"]}, 峰密度={features["right_peak_density"]:.4f}', 
-                     fontsize=11, fontweight='bold')
-        ax8.legend(fontsize=8)
+        # 标注峰值（红色mask）
+        for peak_idx in valid_peak_indices:
+            peak_y = int(peak_idx)
+            peak_x = int(centerline_x[peak_y])
+            
+            # 涂红色区域
+            radius = 8
+            for dy in range(-radius, radius+1):
+                y_pos = peak_y + dy
+                if 0 <= y_pos < len(centerline_x) and 0 <= y_pos < display_img2.shape[0]:
+                    x_pos = int(centerline_x[y_pos])
+                    if 0 <= x_pos < display_img2.shape[1]:
+                        # 向左涂6个像素（峰是向左突出）
+                        for dx in range(-5, 1):
+                            if 0 <= x_pos + dx < display_img2.shape[1]:
+                                display_img2[y_pos, x_pos + dx] = [255, 0, 0]  # 红色
+        
+        ax8.imshow(display_img2)
+        ax8.set_title(f'剪切面峰值位置可视化\n检测到{len(valid_peak_indices)}个峰', 
+                     fontsize=13, fontweight='bold')
         ax8.axis('off')
         
         # 9. 关键特征摘要
@@ -272,34 +499,25 @@ class WearVisualizer:
         ax9.axis('off')
         
         summary_text = f"""
-关键特征摘要
+【关键特征摘要】
 
-【中心线粗糙度（核心指标）】
-中心线RMS: {features['centerline_rms_roughness']:.3f}
+基于中心线检测指标：
+1. 中心线RMS粗糙度: {features.get('centerline_rms_roughness', 0):.3f}
+   (核心磨损指标，反映刃口形状变化)
 
-【边界粗糙度】
-左侧RMS: {features['left_rms_roughness']:.3f}
-右侧RMS: {features['right_rms_roughness']:.3f}
-平均RMS: {features['avg_rms_roughness']:.3f}
+2. 最大缺口深度: {features.get('centerline_max_notch_depth', 0):.3f} 像素
+   (撕裂面凹陷，位于y={features.get('centerline_notch_idx', 0)})
 
-【梯度能量（锐度）】
-左侧: {features['left_gradient_energy']:.2f}
-右侧: {features['right_gradient_energy']:.2f}
-平均: {features['avg_gradient_energy']:.2f}
+3. 剪切面峰数量: {features.get('centerline_peak_count', 0)}
+   (剪切面向左突起，反映微缺口)
 
-【缺口深度】
-左侧最大: {features['left_max_notch']:.3f}
-右侧最大: {features['right_max_notch']:.3f}
-整体最大: {features['max_notch_depth']:.3f}
+4. 峰密度: {features.get('centerline_peak_density', 0):.4f}
+   (反映缺口分布密集度)
 
-【峰统计】
-左侧峰数: {features['left_peak_count']}
-右侧峰数: {features['right_peak_count']}
-左侧峰密度: {features['left_peak_density']:.4f}
-右侧峰密度: {features['right_peak_density']:.4f}
+5. 梯度能量: {features.get('avg_gradient_energy', 0):.1f}
+   (反映表面粗糙度和剪切质量)
 
-【面积比】
-撕裂/剪切: {features['tear_shear_area_ratio']:.3f}
+注: 以上缺口和峰均基于原始中心线检测
         """
         
         ax9.text(0.05, 0.95, summary_text, transform=ax9.transAxes,
