@@ -23,7 +23,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib
 from scipy.signal import find_peaks, savgol_filter
-from scipy.ndimage import uniform_filter1d, maximum_filter1d
+from scipy.ndimage import uniform_filter1d, maximum_filter1d, minimum_filter1d
 from scipy.interpolate import UnivariateSpline
 from datetime import datetime
 from tqdm import tqdm
@@ -102,6 +102,138 @@ class UniversalWearAnalyzer:
         self.visualizer = WearVisualizer(output_dir)
         self.composite_indicator = CompositeWearIndicator()
     
+    @staticmethod
+    def compute_envelope(signal: np.ndarray, window: int = 15):
+        """
+        计算信号的上下包络线
+        
+        Args:
+            signal: 输入信号
+            window: 滑动窗口大小
+            
+        Returns:
+            upper_envelope: 上包络线
+            lower_envelope: 下包络线
+        """
+        if len(signal) < window:
+            return signal.copy(), signal.copy()
+        
+        upper_envelope = maximum_filter1d(signal, size=window, mode='nearest')
+        lower_envelope = minimum_filter1d(signal, size=window, mode='nearest')
+        
+        return upper_envelope, lower_envelope
+    
+    @staticmethod
+    def robust_curve_fit(signal: np.ndarray, percentile_range=(5, 95), smoothing=None, 
+                        use_local_filter=True, local_window=None):
+        """
+        鲁棒曲线拟合：去除离群点后用样条曲线拟合
+        
+        优化策略（2025-10-14更新）：
+        - 自适应平滑参数（根据数据变异系数调整）
+        - 对稀疏峰值数据使用更小的平滑参数
+        - **滑动窗口局部离群点检测**（避免将局部凹陷区域的所有点标记为离群点）
+        
+        Args:
+            signal: 输入信号
+            percentile_range: 保留数据的百分位范围（用于全局粗筛选）
+            smoothing: 样条平滑参数（None表示自动）
+            use_local_filter: 是否使用局部滑动窗口过滤（推荐True）
+            local_window: 局部窗口大小（None表示自动，建议为数据长度的5%-10%）
+            
+        Returns:
+            fitted_curve: 拟合曲线
+            inlier_mask: 内点掩码（True表示非离群点）
+        """
+        if len(signal) < 10:
+            return signal.copy(), np.ones(len(signal), dtype=bool)
+        
+        # === 第1阶段：全局粗筛选（去除极端离群点） ===
+        lower_bound = np.percentile(signal, percentile_range[0])
+        upper_bound = np.percentile(signal, percentile_range[1])
+        global_inlier_mask = (signal >= lower_bound) & (signal <= upper_bound)
+        
+        # === 第2阶段：局部滑动窗口精细过滤 ===
+        if use_local_filter:
+            # 自动确定窗口大小（建议为数据长度的5%-10%）
+            if local_window is None:
+                local_window = max(min(len(signal) // 15, 101), 21)  # 21到101之间
+                if local_window % 2 == 0:
+                    local_window += 1  # 确保是奇数
+            
+            # 初始化局部内点掩码
+            local_inlier_mask = np.ones(len(signal), dtype=bool)
+            
+            # 滑动窗口检测
+            half_window = local_window // 2
+            for i in range(len(signal)):
+                # 定义窗口范围
+                start = max(0, i - half_window)
+                end = min(len(signal), i + half_window + 1)
+                
+                # 获取窗口内的数据（只考虑全局内点）
+                window_indices = np.arange(start, end)
+                window_mask = global_inlier_mask[start:end]
+                window_data = signal[start:end][window_mask]
+                
+                if len(window_data) < 3:
+                    continue
+                
+                # 计算窗口内的局部统计量
+                local_mean = np.mean(window_data)
+                local_std = np.std(window_data)
+                
+                # 局部离群点判断：当前点是否偏离局部均值超过3倍标准差
+                if local_std > 0:
+                    z_score = abs(signal[i] - local_mean) / local_std
+                    if z_score > 3.0:  # 3-sigma规则
+                        local_inlier_mask[i] = False
+            
+            # 综合全局和局部掩码
+            inlier_mask = global_inlier_mask & local_inlier_mask
+        else:
+            # 不使用局部过滤，直接使用全局掩码
+            inlier_mask = global_inlier_mask
+        
+        # === 第3阶段：样条曲线拟合 ===
+        x_inliers = np.where(inlier_mask)[0]
+        y_inliers = signal[inlier_mask]
+        
+        if len(x_inliers) < 4:
+            fitted_curve = np.full(len(signal), np.mean(signal))
+            return fitted_curve, inlier_mask
+        
+        # 自动计算平滑参数（自适应策略）
+        if smoothing is None:
+            # 计算数据的变异系数（CV = std / mean）
+            mean_val = np.abs(np.mean(y_inliers)) + 1e-10
+            std_val = np.std(y_inliers)
+            cv = std_val / mean_val
+            
+            # 根据变异系数调整平滑参数
+            # CV越大（数据波动越大），平滑参数越小（拟合越灵活）
+            if cv > 0.5:  # 高变异（如稀疏峰值数据）
+                smoothing = len(x_inliers) * 0.05  # 更敏感
+            elif cv > 0.2:  # 中等变异
+                smoothing = len(x_inliers) * 0.15
+            else:  # 低变异（稳定数据）
+                smoothing = len(x_inliers) * 0.3
+        
+        try:
+            # 使用三次样条拟合
+            spline = UnivariateSpline(x_inliers, y_inliers, s=smoothing, k=3)
+            x_full = np.arange(len(signal))
+            fitted_curve = spline(x_full)
+        except:
+            # 如果样条失败，使用多项式拟合
+            degree = min(3, len(x_inliers) - 1)
+            coeffs = np.polyfit(x_inliers, y_inliers, degree)
+            poly = np.poly1d(coeffs)
+            x_full = np.arange(len(signal))
+            fitted_curve = poly(x_full)
+        
+        return fitted_curve, inlier_mask
+    
     def extract_features(self, save_diagnosis: bool = True) -> pd.DataFrame:
         """
         提取所有帧的特征
@@ -161,8 +293,8 @@ class UniversalWearAnalyzer:
                         print(f"\n警告: 特征提取失败 frame {frame_id}: {e}")
                     continue
                 
-                # 保存诊断图（按采样间隔）
-                if save_diagnosis and idx % self.diagnosis_interval == 0:
+                # 保存诊断图（按采样间隔，基于frame_id而非索引）
+                if save_diagnosis and frame_id % self.diagnosis_interval == 0:
                     diagnosis_path = os.path.join(diagnosis_dir, f"frame_{frame_id:06d}_diagnosis.png")
                     self.visualizer.visualize_single_frame_diagnosis(
                         image, preprocessed, features, frame_id, diagnosis_path
@@ -188,6 +320,29 @@ class UniversalWearAnalyzer:
         
         df = pd.DataFrame(all_features)
         print(f"成功提取 {len(df)} / {self.total_frames} 帧的特征")
+        
+        # 验证和修正撕裂面占比数据
+        if 'tear_shear_area_ratio' in df.columns:
+            original_ratio = df['tear_shear_area_ratio']
+            invalid_count = (original_ratio < 0).sum() + (original_ratio > 1).sum()
+            
+            if invalid_count > 0:
+                print(f"⚠️  发现 {invalid_count} 个撕裂面占比值超出0-1范围，正在修正...")
+                
+                # 如果有很多值>1，可能是比值形式，使用转换公式
+                if (original_ratio > 1).sum() > len(original_ratio) * 0.1:
+                    print("   使用转换公式: new_ratio = old_ratio / (old_ratio + 1)")
+                    df['tear_shear_area_ratio'] = original_ratio / (original_ratio + 1)
+                else:
+                    print("   直接截断到0-1范围")
+                    df['tear_shear_area_ratio'] = np.clip(original_ratio, 0.0, 1.0)
+                
+                # 验证修正结果
+                corrected_ratio = df['tear_shear_area_ratio']
+                print(f"✅ 修正完成: 最小值={corrected_ratio.min():.4f}, 最大值={corrected_ratio.max():.4f}")
+                print(f"   所有值在0-1范围内: {(corrected_ratio >= 0).all() and (corrected_ratio <= 1).all()}")
+            else:
+                print("✅ 撕裂面占比数据正常（0-1范围）")
         
         # 保存特征
         features_dir = os.path.join(self.output_dir, 'features')
@@ -754,7 +909,7 @@ class UniversalWearAnalyzer:
             'max_notch_depth': '最大缺口深度',
             'right_peak_density': '右侧峰密度（剪切面）',
             'avg_gradient_energy': '梯度能量（锐度）',
-            'tear_shear_area_ratio': '撕裂/剪切面积比'
+            'tear_shear_area_ratio': '撕裂面占比'
         }
         
         # 生成可视化
@@ -1198,7 +1353,7 @@ class UniversalWearAnalyzer:
             ('max_notch_depth', '最大缺口深度 (像素)', 'red'),
             ('right_peak_density', '剪切面峰密度 (个/单位)', 'green'),
             ('avg_gradient_energy', '平均梯度能量', 'purple'),
-            ('tear_shear_area_ratio', '撕裂/剪切面积比', 'orange'),
+            ('tear_shear_area_ratio', '撕裂面占比', 'orange'),
         ]
         
         for idx, (feat, label, color) in enumerate(features):
@@ -1252,7 +1407,7 @@ class UniversalWearAnalyzer:
             'max_notch_depth': '最大缺口深度',
             'right_peak_density': '剪切面峰密度',
             'avg_gradient_energy': '平均梯度能量',
-            'tear_shear_area_ratio': '撕裂/剪切面积比'
+            'tear_shear_area_ratio': '撕裂面占比'
         }
         labels = [feature_labels.get(f, f) for f in available_features]
         ax.set_xticklabels(labels, rotation=45, ha='right')
@@ -1275,7 +1430,7 @@ class UniversalWearAnalyzer:
             ('max_notch_depth', '最大缺口深度'),
             ('right_peak_density', '剪切面峰密度'),
             ('avg_gradient_energy', '平均梯度能量'),
-            ('tear_shear_area_ratio', '撕裂/剪切面积比'),
+            ('tear_shear_area_ratio', '撕裂面占比'),
         ]
         
         window_size = max(10, len(df) // 20)  # 至少10帧
@@ -1317,7 +1472,7 @@ class UniversalWearAnalyzer:
             ('max_notch_depth', '最大缺口深度', 'red'),
             ('right_peak_density', '剪切面峰密度', 'green'),
             ('avg_gradient_energy', '平均梯度能量', 'purple'),
-            ('tear_shear_area_ratio', '撕裂/剪切面积比', 'orange'),
+            ('tear_shear_area_ratio', '撕裂面占比', 'orange'),
         ]
         
         for idx, (feat, label, color) in enumerate(features):
@@ -1376,7 +1531,7 @@ class UniversalWearAnalyzer:
             ('max_notch_depth', '最大缺口深度', 'red'),
             ('right_peak_density', '剪切面峰密度', 'green'),
             ('avg_gradient_energy', '平均梯度能量', 'purple'),
-            ('tear_shear_area_ratio', '撕裂/剪切面积比', 'orange'),
+            ('tear_shear_area_ratio', '撕裂面占比', 'orange'),
         ]
         
         # 创建输出目录
@@ -1391,25 +1546,58 @@ class UniversalWearAnalyzer:
             # 创建单独的图表，x轴拉长至60英寸（与split_longterm_trend_charts.py一致）
             fig, ax = plt.subplots(figsize=(60, 6))
             
+            # 获取数据
+            y_values = df[feat].values
+            
+            # 计算包络线
+            upper_env, lower_env = self.compute_envelope(y_values, window=min(31, len(y_values)//10))
+            
+            # 计算鲁棒拟合曲线
+            fitted_curve, inlier_mask = self.robust_curve_fit(y_values, percentile_range=(5, 95))
+            
+            # 绘制包络范围（填充）
+            ax.fill_between(df['frame_id'], lower_env, upper_env,
+                           alpha=0.15, color='gray', label='包络范围', zorder=1)
+            
+            # 绘制上下包络线
+            ax.plot(df['frame_id'], upper_env, ':', linewidth=1.5, 
+                   color='red', alpha=0.6, label='上包络', zorder=2)
+            ax.plot(df['frame_id'], lower_env, ':', linewidth=1.5, 
+                   color='green', alpha=0.6, label='下包络', zorder=2)
+            
             # 原始数据连线（半透明）
-            ax.plot(df['frame_id'], df[feat],
+            ax.plot(df['frame_id'], y_values,
                    alpha=0.3, linewidth=1.2, color=color,
-                   zorder=1, label='逐帧曲线')
+                   zorder=3, label='逐帧曲线')
             
             # 散点标记
-            ax.scatter(df['frame_id'], df[feat],
-                      alpha=0.4, s=15, color=color, zorder=2)
+            ax.scatter(df['frame_id'], y_values,
+                      alpha=0.4, s=15, color=color, zorder=4)
+            
+            # 标注离群点
+            outlier_indices = np.where(~inlier_mask)[0]
+            if len(outlier_indices) > 0:
+                ax.scatter(df['frame_id'].iloc[outlier_indices], 
+                          y_values[outlier_indices],
+                          c='orange', s=30, marker='x', alpha=0.7, 
+                          label=f'离群点({len(outlier_indices)}个)', zorder=5)
+            
+            # 鲁棒拟合曲线（主趋势）
+            ax.plot(df['frame_id'], fitted_curve,
+                   color='purple', linewidth=3, linestyle='-',
+                   alpha=0.8, zorder=6, label='鲁棒拟合')
             
             # 线性拟合趋势线
-            z = np.polyfit(df['frame_id'], df[feat], 1)
+            z = np.polyfit(df['frame_id'], y_values, 1)
             p = np.poly1d(z)
             ax.plot(df['frame_id'], p(df['frame_id']),
-                   color='darkred', linewidth=3, linestyle='--',
-                   zorder=3, label=f'线性趋势: y={z[0]:.6f}x+{z[1]:.2f}')
+                   color='darkred', linewidth=2.5, linestyle='--',
+                   zorder=7, label=f'线性趋势: y={z[0]:.6f}x+{z[1]:.2f}')
             
-            # 计算趋势方向
+            # 计算趋势方向和内点率
             trend = "增加" if z[0] > 0 else "减少"
-            ax.text(0.05, 0.95, f'趋势: {trend}',
+            inlier_ratio = inlier_mask.sum() / len(inlier_mask) * 100
+            ax.text(0.05, 0.95, f'趋势: {trend}\n内点率: {inlier_ratio:.1f}%',
                    transform=ax.transAxes, fontsize=11,
                    verticalalignment='top',
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
@@ -1445,7 +1633,7 @@ class UniversalWearAnalyzer:
             ('max_notch_depth', '最大缺口深度', 'red'),
             ('right_peak_density', '剪切面峰密度', 'green'),
             ('avg_gradient_energy', '平均梯度能量', 'purple'),
-            ('tear_shear_area_ratio', '撕裂/剪切面积比', 'orange'),
+            ('tear_shear_area_ratio', '撕裂面占比', 'orange'),
         ]
         
         # 创建输出目录
@@ -1476,25 +1664,53 @@ class UniversalWearAnalyzer:
         if len(valid_features) > 0:
             composite_score = composite_score / len(valid_features)
         
-        # 绘制综合指标
+        # 计算包络线和鲁棒拟合
+        upper_env_comp, lower_env_comp = self.compute_envelope(composite_score, window=min(31, len(composite_score)//10))
+        fitted_curve_comp, inlier_mask_comp = self.robust_curve_fit(composite_score, percentile_range=(5, 95))
+        
+        # 绘制包络范围
+        ax_composite.fill_between(df['frame_id'], lower_env_comp, upper_env_comp,
+                                 alpha=0.15, color='gray', label='包络范围', zorder=1)
+        
+        # 绘制包络线
+        ax_composite.plot(df['frame_id'], upper_env_comp, ':', linewidth=1.5, 
+                         color='red', alpha=0.6, label='上包络', zorder=2)
+        ax_composite.plot(df['frame_id'], lower_env_comp, ':', linewidth=1.5, 
+                         color='green', alpha=0.6, label='下包络', zorder=2)
+        
+        # 绘制综合指标（半透明）
         ax_composite.plot(df['frame_id'], composite_score,
                          alpha=0.3, linewidth=1.5, color='darkblue',
-                         zorder=1, label='综合磨损指标')
+                         zorder=3, label='综合磨损指标')
         
         ax_composite.scatter(df['frame_id'], composite_score,
-                            alpha=0.4, s=20, color='darkblue', zorder=2)
+                            alpha=0.4, s=20, color='darkblue', zorder=4)
+        
+        # 标注离群点
+        outlier_indices_comp = np.where(~inlier_mask_comp)[0]
+        if len(outlier_indices_comp) > 0:
+            ax_composite.scatter(df['frame_id'].iloc[outlier_indices_comp], 
+                                composite_score[outlier_indices_comp],
+                                c='orange', s=35, marker='x', alpha=0.7, 
+                                label=f'离群点({len(outlier_indices_comp)}个)', zorder=5)
+        
+        # 鲁棒拟合曲线
+        ax_composite.plot(df['frame_id'], fitted_curve_comp,
+                         color='purple', linewidth=3.5, linestyle='-',
+                         alpha=0.8, zorder=6, label='鲁棒拟合')
         
         # 线性拟合
         z_comp = np.polyfit(df['frame_id'], composite_score, 1)
         p_comp = np.poly1d(z_comp)
         ax_composite.plot(df['frame_id'], p_comp(df['frame_id']),
-                         color='red', linewidth=4, linestyle='--',
-                         zorder=3, label=f'线性趋势: y={z_comp[0]:.6f}x+{z_comp[1]:.2f}')
+                         color='red', linewidth=3, linestyle='--',
+                         zorder=7, label=f'线性趋势: y={z_comp[0]:.6f}x+{z_comp[1]:.2f}')
         
-        # 趋势标注
+        # 趋势标注（包含内点率）
         trend_comp = "增加" if z_comp[0] > 0 else "减少"
         trend_color_comp = 'lightgreen' if z_comp[0] > 0 else 'lightcoral'
-        ax_composite.text(0.02, 0.98, f'趋势: {trend_comp}',
+        inlier_ratio_comp = inlier_mask_comp.sum() / len(inlier_mask_comp) * 100
+        ax_composite.text(0.02, 0.98, f'趋势: {trend_comp}\n内点率: {inlier_ratio_comp:.1f}%',
                          transform=ax_composite.transAxes, fontsize=12,
                          verticalalignment='top', fontweight='bold',
                          bbox=dict(boxstyle='round', facecolor=trend_color_comp, alpha=0.7,
@@ -1541,26 +1757,57 @@ class UniversalWearAnalyzer:
                 ax.set_title(f'{label} - 数据缺失', fontsize=14, fontweight='bold')
                 continue
             
+            # 获取数据
+            y_values = df[feat].values
+            
+            # 计算包络线和鲁棒拟合
+            upper_env, lower_env = self.compute_envelope(y_values, window=min(31, len(y_values)//10))
+            fitted_curve, inlier_mask = self.robust_curve_fit(y_values, percentile_range=(5, 95))
+            
+            # 绘制包络范围
+            ax.fill_between(df['frame_id'], lower_env, upper_env,
+                           alpha=0.15, color='gray', label='包络范围', zorder=1)
+            
+            # 绘制包络线
+            ax.plot(df['frame_id'], upper_env, ':', linewidth=1.5, 
+                   color='red', alpha=0.6, label='上包络', zorder=2)
+            ax.plot(df['frame_id'], lower_env, ':', linewidth=1.5, 
+                   color='green', alpha=0.6, label='下包络', zorder=2)
+            
             # 原始数据连线（半透明）
-            ax.plot(df['frame_id'], df[feat],
+            ax.plot(df['frame_id'], y_values,
                    alpha=0.3, linewidth=1.2, color=color,
-                   zorder=1, label='逐帧曲线')
+                   zorder=3, label='逐帧曲线')
             
             # 散点标记
-            ax.scatter(df['frame_id'], df[feat],
-                      alpha=0.4, s=15, color=color, zorder=2)
+            ax.scatter(df['frame_id'], y_values,
+                      alpha=0.4, s=15, color=color, zorder=4)
+            
+            # 标注离群点
+            outlier_indices = np.where(~inlier_mask)[0]
+            if len(outlier_indices) > 0:
+                ax.scatter(df['frame_id'].iloc[outlier_indices], 
+                          y_values[outlier_indices],
+                          c='orange', s=30, marker='x', alpha=0.7, 
+                          label=f'离群点({len(outlier_indices)}个)', zorder=5)
+            
+            # 鲁棒拟合曲线
+            ax.plot(df['frame_id'], fitted_curve,
+                   color='purple', linewidth=2.5, linestyle='-',
+                   alpha=0.8, zorder=6, label='鲁棒拟合')
             
             # 线性拟合趋势线
-            z = np.polyfit(df['frame_id'], df[feat], 1)
+            z = np.polyfit(df['frame_id'], y_values, 1)
             p = np.poly1d(z)
             ax.plot(df['frame_id'], p(df['frame_id']),
-                   color='darkred', linewidth=3, linestyle='--',
-                   zorder=3, label=f'线性趋势: y={z[0]:.6f}x+{z[1]:.2f}')
+                   color='darkred', linewidth=2.5, linestyle='--',
+                   zorder=7, label=f'线性趋势: y={z[0]:.6f}x+{z[1]:.2f}')
             
-            # 计算趋势方向
+            # 计算趋势方向和内点率
             trend = "增加" if z[0] > 0 else "减少"
             trend_color = 'lightgreen' if z[0] > 0 else 'lightcoral'
-            ax.text(0.02, 0.98, f'趋势: {trend}',
+            inlier_ratio = inlier_mask.sum() / len(inlier_mask) * 100
+            ax.text(0.02, 0.98, f'趋势: {trend}\n内点率: {inlier_ratio:.1f}%',
                    transform=ax.transAxes, fontsize=11,
                    verticalalignment='top',
                    bbox=dict(boxstyle='round', facecolor=trend_color, alpha=0.6,
@@ -1843,7 +2090,7 @@ class UniversalWearAnalyzer:
             'avg_rms_roughness': 'RMS粗糙度',
             'max_notch_depth': '缺口深度',
             'avg_gradient_energy': '梯度能量',
-            'tear_shear_area_ratio': '面积比'
+            'tear_shear_area_ratio': '撕裂面占比'
         }
         for feat in available:
             weight = weights.get(feat, 0.25)
@@ -2921,13 +3168,13 @@ class UniversalWearAnalyzer:
         markers_dir = os.path.join(viz_dir, 'white_patch_markers')
         ensure_dir(markers_dir)
         
-        # 选择要可视化的帧
-        sample_indices = list(range(0, len(df), sample_interval))
+        # 选择要可视化的帧（基于frame_id而非DataFrame索引）
+        df_sampled = df[df['frame_id'] % sample_interval == 0].head(20)  # 最多20张避免太多
         method_names_display = ['固定阈值', 'Otsu自适应', '相对亮度', '形态学Top-Hat']
         
-        for sample_idx in tqdm(sample_indices[:20], desc="生成标注图"):  # 最多20张避免太多
+        for _, row in tqdm(df_sampled.iterrows(), total=len(df_sampled), desc="生成标注图"):
             try:
-                frame_id = int(df.iloc[sample_idx]['frame_id'])
+                frame_id = int(row['frame_id'])
                 
                 # 读取原图
                 filepath = os.path.join(self.roi_dir, f'frame_{frame_id:06d}_roi.png')
@@ -3030,7 +3277,7 @@ class UniversalWearAnalyzer:
                 plt.close()
                 
             except Exception as e:
-                print(f"\n  处理帧{sample_idx}时出错: {e}")
+                print(f"\n  处理帧{frame_id}时出错: {e}")
                 continue
         
         print(f"  已保存标注图到: {markers_dir}")
