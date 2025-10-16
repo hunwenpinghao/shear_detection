@@ -262,10 +262,10 @@ def _generate_combined_plot_7x1(df: pd.DataFrame, features_to_plot: list, output
     # 定义磨损指标及其方向性（基于多周期分析结果）
     wear_indicators = {
         # 正向指标：值越大，磨损越严重（在多周期内验证有效）
-        'tear_shear_area_ratio': {'weight': 0.35, 'direction': 'negative', 'name': '撕裂面占比'},
+        'tear_shear_area_ratio': {'weight': 0.35, 'direction': 'positive', 'name': '撕裂面占比'},
         
         # 反向指标：值越小，磨损越严重（在多周期内验证有效）
-        'right_peak_density': {'weight': 0.25, 'direction': 'positive', 'name': '剪切面峰密度'},
+        'right_peak_density': {'weight': 0.25, 'direction': 'negative', 'name': '剪切面峰密度'},
         'avg_gradient_energy': {'weight': 0.25, 'direction': 'negative', 'name': '平均梯度能量'},
         
         # 需要进一步验证的指标（在多周期内表现不一致）
