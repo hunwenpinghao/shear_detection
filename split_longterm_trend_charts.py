@@ -170,10 +170,10 @@ def process_directory(input_dir: str, csv_path: str, output_subdir: str, dpi: in
                           c='orange', s=30, marker='x', alpha=0.7, 
                           label=f'离群点({len(outlier_indices)}个)', zorder=5)
             
-            # 鲁棒拟合曲线（主趋势）
-            ax.plot(df['frame_id'], fitted_curve,
-                   color='purple', linewidth=3, linestyle='-',
-                   alpha=0.8, zorder=6, label='鲁棒拟合')
+            # # 鲁棒拟合曲线（主趋势）
+            # ax.plot(df['frame_id'], fitted_curve,
+            #        color='purple', linewidth=3, linestyle='-',
+            #        alpha=0.8, zorder=6, label='鲁棒拟合')
             
             # 线性拟合趋势线（使用内点）
             x_inliers = df['frame_id'][inlier_mask]
@@ -262,10 +262,10 @@ def _generate_combined_plot_7x1(df: pd.DataFrame, features_to_plot: list, output
     # 定义磨损指标及其方向性（基于多周期分析结果）
     wear_indicators = {
         # 正向指标：值越大，磨损越严重（在多周期内验证有效）
-        'tear_shear_area_ratio': {'weight': 0.35, 'direction': 'positive', 'name': '撕裂面占比'},
+        'tear_shear_area_ratio': {'weight': 0.35, 'direction': 'negative', 'name': '撕裂面占比'},
         
         # 反向指标：值越小，磨损越严重（在多周期内验证有效）
-        'right_peak_density': {'weight': 0.25, 'direction': 'negative', 'name': '剪切面峰密度'},
+        'right_peak_density': {'weight': 0.25, 'direction': 'positive', 'name': '剪切面峰密度'},
         'avg_gradient_energy': {'weight': 0.25, 'direction': 'negative', 'name': '平均梯度能量'},
         
         # 需要进一步验证的指标（在多周期内表现不一致）
@@ -364,10 +364,10 @@ def _generate_combined_plot_7x1(df: pd.DataFrame, features_to_plot: list, output
                             c='orange', s=35, marker='x', alpha=0.7, 
                             label=f'离群点({len(outlier_indices_comp)}个)', zorder=5)
     
-    # 鲁棒拟合曲线
-    ax_composite.plot(df['frame_id'], fitted_curve_comp,
-                     color='purple', linewidth=3.5, linestyle='-',
-                     alpha=0.8, zorder=6, label='鲁棒拟合')
+    # # 鲁棒拟合曲线
+    # ax_composite.plot(df['frame_id'], fitted_curve_comp,
+    #                  color='purple', linewidth=3.5, linestyle='-',
+    #                  alpha=0.8, zorder=6, label='鲁棒拟合')
     
     # 线性拟合（使用内点）
     x_inliers_comp = df['frame_id'][inlier_mask_comp]
@@ -489,10 +489,10 @@ def _generate_combined_plot_7x1(df: pd.DataFrame, features_to_plot: list, output
                       c='orange', s=30, marker='x', alpha=0.7, 
                       label=f'离群点({len(outlier_indices)}个)', zorder=5)
         
-        # 鲁棒拟合曲线
-        ax.plot(df['frame_id'], fitted_curve,
-               color='purple', linewidth=2.5, linestyle='-',
-               alpha=0.8, zorder=6, label='鲁棒拟合')
+        # # 鲁棒拟合曲线
+        # ax.plot(df['frame_id'], fitted_curve,
+        #        color='purple', linewidth=2.5, linestyle='-',
+        #        alpha=0.8, zorder=6, label='鲁棒拟合')
         
         # 线性拟合趋势线（使用内点）
         x_inliers = df['frame_id'][inlier_mask]
@@ -603,10 +603,10 @@ def _generate_combined_plot_7x1(df: pd.DataFrame, features_to_plot: list, output
                             c='orange', s=30, marker='x', alpha=0.7, 
                             label=f'离群点({len(outlier_indices_patch)}个)', zorder=5)
         
-        # 鲁棒拟合曲线
-        ax_patch.plot(df['frame_id'], fitted_curve_patch,
-                     color='purple', linewidth=2.5, linestyle='-',
-                     alpha=0.8, zorder=6, label='鲁棒拟合')
+        # # 鲁棒拟合曲线
+        # ax_patch.plot(df['frame_id'], fitted_curve_patch,
+        #              color='purple', linewidth=2.5, linestyle='-',
+        #              alpha=0.8, zorder=6, label='鲁棒拟合')
         
         # 线性拟合趋势线（使用内点）
         x_inliers_patch = df['frame_id'][inlier_mask_patch]
